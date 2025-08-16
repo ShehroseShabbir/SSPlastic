@@ -1,0 +1,9 @@
+{% extends "core/change_form.html" %}
+{% block object-tools-items %}
+    {{ block.super }}
+    <li>
+        <a href="{% url 'admin:core_employee_duplicate' original.pk %}">
+            Duplicate this Employee
+        </a>
+    </li>
+{% endblock %}

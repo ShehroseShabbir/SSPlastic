@@ -1,0 +1,44 @@
+{% load static %}
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Employees</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#f4f6f9;margin:0;padding:20px}
+    .wrap{max-width:1100px;margin:0 auto}
+    h1{margin:0 0 12px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
+    .card{background:#fff;border:1px solid #eaeaea;border-radius:8px;padding:12px}
+    .name{font-weight:700;margin-bottom:6px}
+    .img{width:100%;height:160px;background:#f1f1f1;border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+    .img img{max-width:100%;max-height:100%}
+    .meta{font-size:13px;color:#555;margin-top:8px;line-height:1.4}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Employees</h1>
+  <div class="grid">
+    {% for emp in employees %}
+    <div class="card">
+      <div class="img">
+        {% if emp.profile_picture %}
+          <img src="{{ emp.profile_picture.url }}" alt="{{ emp.name }}">
+        {% else %}
+          <span>No Photo</span>
+        {% endif %}
+      </div>
+      <div class="name">{{ emp.name }}</div>
+      <div class="meta">CNIC: {{ emp.cnic|default:"—" }}</div>
+      <div class="meta">Phone: {{ emp.phone|default:"—" }}</div>
+      <div class="meta">Salary: PKR {{ emp.salary }}</div>
+      <div class="meta">Join: {{ emp.join_date|default:"—" }}</div>
+      <div class="meta">Contract End: {{ emp.contract_end_date|default:"—" }}</div>
+      {% if emp.contract_file %}<div class="meta"><a href="{{ emp.contract_file.url }}" target="_blank">Contract</a></div>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+</body>
+</html>

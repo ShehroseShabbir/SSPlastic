@@ -1,0 +1,21 @@
+# Python / Django
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+.venv/
+venv/
+*.log
+
+# Django artifacts
+db.sqlite3
+invoices/
+media/
+staticfiles/        # your STATIC_ROOT; keep if you collect to this folder
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

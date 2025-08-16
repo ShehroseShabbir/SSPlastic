@@ -1,0 +1,181 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Customer Balances</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="{% static 'core/favicon.ico' %}">
+  <style>
+    :root{
+      --bg:#f7f9fc;
+      --card:#ffffff;
+      --text:#1f2937;
+      --muted:#6b7280;
+      --border:#e5e7eb;
+      --accent:#2563eb;
+      --accent-weak:#eff6ff;
+      --ok:#16a34a;
+      --warn:#f59e0b;
+      --danger:#dc2626;
+    }
+
+    /* Layout */
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial;}
+    .container{max-width:1200px;margin:0 auto;padding:16px;}
+
+    /* Header */
+    .site-header{
+      position:sticky; top:0; z-index:10;
+      background:var(--card); border-bottom:1px solid var(--border);
+    }
+    .site-header .row{
+      display:flex; align-items:center; justify-content:space-between;
+      gap:12px; padding:10px 16px;
+    }
+    .brand{display:flex; align-items:center; gap:10px;}
+    .brand img{height:28px;width:auto;}
+    .brand strong{font-size:16px;}
+    nav a{
+      text-decoration:none; color:var(--muted); padding:6px 10px; border-radius:8px;
+    }
+    nav a:hover{background:var(--accent-weak); color:var(--accent);}
+
+    /* Tools */
+    .tools{display:flex; gap:8px; margin:16px 0;}
+    .search{
+      flex:1; background:#fff; border:1px solid var(--border); border-radius:8px;
+      padding:10px 12px; outline:none;
+    }
+    .btn{
+      background:var(--card); border:1px solid var(--border); border-radius:8px;
+      padding:10px 12px; text-decoration:none; color:var(--text);
+    }
+    .btn:hover{border-color:var(--accent); color:var(--accent);}
+
+    /* Card */
+    .card{
+      background:var(--card); border:1px solid var(--border); border-radius:12px;
+      overflow:hidden;
+    }
+
+    /* Table */
+    table{width:100%; border-collapse:separate; border-spacing:0;}
+    thead th {
+  position: sticky;
+  top: 56px; /* match actual header height */
+  z-index: 5;
+  background: #fafafa;
+  color: #374151;
+  font-weight: 600;
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+    tbody td{
+      padding:10px 12px; border-bottom:1px solid var(--border);
+    }
+    tbody tr:nth-child(odd){background:#fcfdff;}
+    .num{ text-align:right; font-variant-numeric:tabular-nums; }
+    .muted{ color:var(--muted); }
+
+    /* Status pill */
+    .pill{
+      display:inline-block; padding:2px 8px; border-radius:999px; color:#fff; font-size:12px;
+    }
+    .pill.ok{ background:var(--ok); }
+    .pill.warn{ background:var(--warn); }
+    .pill.danger{ background:var(--danger); }
+
+    /* Responsive (stack rows on very small screens) */
+    @media (max-width: 720px){
+      thead{display:none;}
+      tbody tr{display:block; border-bottom:1px solid var(--border); margin-bottom:8px; background:#fff;}
+      tbody td{display:flex; justify-content:space-between; gap:12px; border:none; padding:8px 12px;}
+      tbody td::before{content:attr(data-h); color:var(--muted);}
+      .num{text-align:left;}
+      .tools{flex-direction:column;}
+    }
+  </style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="row container">
+    <div class="brand">
+      <img src="{% static 'core/logo.png' %}" alt="Logo">
+      <strong>Customer Balances</strong>
+    </div>
+    <nav>
+      <a href="/admin/">Admin</a>
+      <a href="{% url 'customer_balances' %}">Balances</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+  <div class="tools">
+    <input id="q" class="search" type="search" placeholder="Search customer, contact or phone…">
+    <a class="btn" href="?format=csv" title="Download CSV">Export CSV</a>
+  </div>
+
+  <div class="card">
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Contact</th>
+          <th>Phone</th>
+          <th class="num">Material Balance (kg)</th>
+          <th class="num">Outstanding</th>
+          <th>Status</th>
+          <th class="num">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td data-h="Customer">{{ r.company_name }}</td>
+          <td data-h="Contact" class="muted">{{ r.contact_name|default:"—" }}</td>
+          <td data-h="Phone" class="muted">{{ r.phone|default:"—" }}</td>
+          <td data-h="Material" class="num">{{ r.material_balance_kg|floatformat:3 }}</td>
+          <td data-h="Outstanding" class="num">{{ r.outstanding_amount|floatformat:2 }}</td>
+          <td data-h="Status">
+            {% if r.outstanding_amount > 0 %}
+              <span class="pill warn">Due</span>
+            {% else %}
+              <span class="pill ok">Clear</span>
+            {% endif %}
+          </td>
+          <td class="num" data-h="Actions">
+            <a class="btn" href="/admin/core/order/?customer__id__exact={{ r.id }}">Orders</a>
+            <a class="btn" href="/admin/core/customer/{{ r.id }}/change/">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="7" class="muted" style="text-align:center;">No customers yet.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+  // Simple client-side filter
+  (function(){
+    const q = document.getElementById('q');
+    const tb = document.getElementById('tbl').tBodies[0];
+    q.addEventListener('input', function(){
+      const needle = this.value.trim().toLowerCase();
+      for (const tr of tb.rows) {
+        const show = tr.innerText.toLowerCase().includes(needle);
+        tr.style.display = show ? '' : 'none';
+      }
+    });
+  })();
+</script>
+
+</body>
+</html>

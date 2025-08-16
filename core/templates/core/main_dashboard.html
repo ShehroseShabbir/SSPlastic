@@ -1,0 +1,299 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" data-theme="">
+<head>
+<meta charset="UTF-8">
+<title>Dashboard - S.S Plastic</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  /* LIGHT THEME (default) */
+  :root{
+    --brand:#0366d6;
+    --bg:#f4f6f9;
+    --card:#ffffff;
+    --text:#111827;
+    --muted:#6b7280;
+    --border:#e5e7eb;
+    --warn:#f59e0b;
+    --ok:#16a34a;
+    --danger:#dc2626;
+    --table-head:#fafafa;
+    --btn-bg:#ffffff;
+  }
+  /* DARK THEME (applies when data-theme="dark" OR prefers-color-scheme) */
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1420; --card:#121a2a; --text:#e6edf7; --muted:#9fb0d0; --border:#1f2a44;
+      --table-head:#0b1020; --btn-bg:#0f172a;
+    }
+  }
+  html[data-theme="dark"]{
+    --bg:#0f1420; --card:#121a2a; --text:#e6edf7; --muted:#9fb0d0; --border:#1f2a44;
+    --table-head:#0b1020; --btn-bg:#0f172a;
+  }
+
+  body{margin:0;font-family:"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--text);}
+  header{display:flex;align-items:center;justify-content:space-between;background:var(--brand);color:#fff;padding:10px 20px;position:sticky;top:0;z-index:10}
+  header img{height:42px}
+  header nav a{color:#fff;margin-left:18px;text-decoration:none;font-weight:600;opacity:.9}
+  header nav a:hover{opacity:1;text-decoration:underline}
+  .theme-toggle{margin-left:12px;border:0;background:#ffffff22;color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer}
+  .container{max-width:1200px;margin:0 auto;padding:20px}
+  h1{margin:10px 0 8px}
+  h2{margin:18px 0 10px}
+
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:16px 0 22px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.05);padding:18px;text-align:center}
+  .card h2{margin:0;font-size:28px;color:var(--brand)}
+  .card p{margin:6px 0 0;color:var(--muted);font-weight:600}
+
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.05);padding:16px}
+  .chart-wrap{position:relative;width:100%;height:360px}
+  canvas{display:block !important;width:100% !important;height:100% !important}
+
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:10px 12px;border-bottom:1px solid var(--border);text-align:left}
+  th{background:var(--table-head)}
+  tr:hover{background:rgba(3,102,214,0.05)}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;color:#fff;font-size:12px}
+  .pill.warn{background:var(--warn)} .pill.ok{background:var(--ok)} .pill.danger{background:var(--danger)}
+  .actions a{display:inline-block;margin-left:6px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;text-decoration:none;color:var(--text);background:var(--btn-bg)}
+  .actions a:hover{border-color:var(--brand);color:var(--brand)}
+
+  @media(max-width: 1020px){ .cards{grid-template-columns:repeat(2,1fr)} .grid{grid-template-columns:1fr} }
+  @media(max-width: 640px){ .cards{grid-template-columns:1fr} header img{height:36px} }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><img src="{% static 'core/logo.png' %}" alt="S.S Plastic Logo"></div>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/admin/core/order/">Orders</a>
+    <a href="/admin/core/customer/">Customers</a>
+    <a href="/admin/core/payment/">Payments</a>
+    <a href="/admin/">Admin</a>
+    <button id="themeBtn" class="theme-toggle" type="button">🌙/☀️</button>
+  </nav>
+</header>
+
+<div class="container">
+  <h1>Dashboard</h1>
+
+  <!-- Summary Cards -->
+  <div class="cards">
+    <div class="card"><h2>{{ cards.open_orders }}</h2><p>Open Orders</p></div>
+    <div class="card"><h2>{{ cards.pending_payments|floatformat:2 }}</h2><p>Pending Payments (PKR)</p></div>
+    <div class="card"><h2>{{ cards.overdue_orders }}</h2><p>Overdue Orders</p></div>
+    <div class="card"><h2>{{ cards.total_material|floatformat:3 }}</h2><p>Total Material Balance (kg)</p></div>
+  </div>
+
+  <!-- Charts Row 1 -->
+  <div class="grid">
+    <div class="panel">
+      <h2>Sales per Month</h2>
+      <div class="chart-wrap"><canvas id="salesChart"></canvas></div>
+    </div>
+    <div class="panel">
+      <h2>Payment Status</h2>
+      <div class="chart-wrap" style="height:280px"><canvas id="statusChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Charts Row 2 -->
+  <div class="grid" style="margin-top:16px">
+    <div class="panel">
+      <h2>Material In vs Out (Monthly)</h2>
+      <div class="chart-wrap"><canvas id="materialChart"></canvas></div>
+    </div>
+    <div class="panel">
+      <h2>Production (kg) — Weekly</h2>
+      <div class="chart-wrap" style="height:280px"><canvas id="prodWeekChart"></canvas></div>
+      <h2 style="margin-top:12px">Production (kg) — Last 14 days</h2>
+      <div class="chart-wrap" style="height:220px"><canvas id="prodDayChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Open Orders + Top Lists -->
+  <div class="grid" style="margin-top:16px">
+    <div class="panel">
+      <h2>Open Orders (Top 10)</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice</th><th>Customer</th>
+            <th class="num">Total</th><th class="num">Outstanding</th><th>Delivery</th><th class="num">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in open_orders_rows %}
+          <tr>
+            <td>{{ r.invoice }}</td>
+            <td>{{ r.customer }}</td>
+            <td class="num">{{ r.total|floatformat:2 }}</td>
+            <td class="num">{{ r.outstanding|floatformat:2 }}</td>
+            <td>{{ r.delivery|date:"Y-m-d" }}</td>
+            <td class="actions num">
+              <a href="/admin/core/order/{{ r.order_id }}/change/">Open</a>
+              <a href="/admin/core/order/?id={{ r.order_id }}">Filter</a>
+            </td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="6">No open orders.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <h2>Top Outstanding Customers</h2>
+      <table>
+        <thead><tr><th>Customer</th><th class="num">Outstanding</th><th class="num">Actions</th></tr></thead>
+        <tbody>
+          {% for c in top_outstanding %}
+          <tr>
+            <td>{{ c.company_name }}</td>
+            <td class="num">{{ c.amount|floatformat:2 }}</td>
+            <td class="actions num">
+              <a href="/admin/core/order/?customer__id__exact={{ c.id }}">Orders</a>
+              <a href="/admin/core/customer/{{ c.id }}/change/">Edit</a>
+            </td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="3">No dues.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <h2 style="margin-top:18px">Lowest Material Balance</h2>
+      <table>
+        <thead><tr><th>Customer</th><th class="num">Balance (kg)</th><th>Status</th><th class="num">Actions</th></tr></thead>
+        <tbody>
+          {% for c in low_stock %}
+          <tr>
+            <td>{{ c.company_name }}</td>
+            <td class="num">{{ c.balance|floatformat:3 }}</td>
+            <td>
+              {% if c.balance|floatformat:3 <= 0 %}
+                <span class="pill danger">Short</span>
+              {% elif c.balance|floatformat:3 < 25 %}
+                <span class="pill warn">Low</span>
+              {% else %}
+                <span class="pill ok">OK</span>
+              {% endif %}
+            </td>
+            <td class="actions num">
+              <a href="/admin/core/customer/{{ c.id }}/change/">Customer</a>
+            </td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="4">No balances found.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- Theme toggle (persists in localStorage) ---
+  const btn = document.getElementById('themeBtn');
+  const root = document.documentElement;
+  const KEY = 'ssplastic-theme';
+  const saved = localStorage.getItem(KEY);
+  if (saved) root.setAttribute('data-theme', saved);
+  btn.addEventListener('click', () => {
+    const cur = root.getAttribute('data-theme') === 'dark' ? '' : 'dark';
+    if (cur) root.setAttribute('data-theme', cur); else root.removeAttribute('data-theme');
+    localStorage.setItem(KEY, cur);
+    // Redraw charts for better contrast
+    for (const c of window.__charts || []) c.update();
+  });
+
+  // Utility to read CSS variable for chart colors
+  function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function chartTextColor(){ return cssVar('--text') || '#111827'; }
+  function gridColor(){ return cssVar('--border') || '#e5e7eb'; }
+
+  // Data from context
+  const salesLabels = {{ sales_labels|safe }};
+  const salesValues = {{ sales_values|safe }};
+  const statusCounts = {{ status_counts|safe }};
+  const materialMonthLabels = {{ material_month_labels|safe }};
+  const materialInValues = {{ material_in_values|safe }};
+  const materialOutValues = {{ material_out_values|safe }};
+  const prodWeekLabels = {{ production_week_labels|safe }};
+  const prodWeekValues = {{ production_week_values|safe }};
+  const prodDayLabels = {{ production_day_labels|safe }};
+  const prodDayValues = {{ production_day_values|safe }};
+
+  window.__charts = [];
+
+  // Sales per Month
+  window.__charts.push(new Chart(document.getElementById('salesChart').getContext('2d'), {
+    type: 'bar',
+    data: { labels: salesLabels, datasets: [{ label: 'Sales (PKR)', data: salesValues, borderWidth: 1 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
+               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
+      plugins: { legend: { display: true, position: 'top', labels:{ color: chartTextColor() } } }
+    }
+  }));
+
+  // Payment Status
+  window.__charts.push(new Chart(document.getElementById('statusChart').getContext('2d'), {
+    type: 'doughnut',
+    data: { labels: ['Paid','Partial','Pending'], datasets: [{ data: [statusCounts.paid, statusCounts.partial, statusCounts.pending] }] },
+    options: { responsive: true, maintainAspectRatio: false, cutout: '55%',
+      plugins: { legend: { position: 'bottom', labels:{ color: chartTextColor() } } }
+    }
+  }));
+
+  // Material In vs Out (Monthly)
+  window.__charts.push(new Chart(document.getElementById('materialChart').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: materialMonthLabels,
+      datasets: [
+        { label: 'IN (kg)',  data: materialInValues,  borderWidth: 1 },
+        { label: 'OUT (kg)', data: materialOutValues, borderWidth: 1 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
+               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
+      plugins: { legend: { position: 'top', labels:{ color: chartTextColor() } } }
+    }
+  }));
+
+  // Production Weekly
+  window.__charts.push(new Chart(document.getElementById('prodWeekChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: prodWeekLabels, datasets: [{ label: 'kg per week', data: prodWeekValues, borderWidth: 2, tension: .25, fill: false }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
+               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
+      plugins: { legend: { position: 'top', labels:{ color: chartTextColor() } } }
+    }
+  }));
+
+  // Production Daily (last 14 days)
+  window.__charts.push(new Chart(document.getElementById('prodDayChart').getContext('2d'), {
+    type: 'line',
+    data: { labels: prodDayLabels, datasets: [{ label: 'kg per day', data: prodDayValues, borderWidth: 2, tension: .25, fill: false }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
+               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
+      plugins: { legend: { position: 'top', labels:{ color: chartTextColor() } } }
+    }
+  }));
+</script>
+</body>
+</html>

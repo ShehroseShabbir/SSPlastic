@@ -1,0 +1,136 @@
+{% extends "admin/change_form.html" %}
+{% load i18n admin_urls static %}
+
+{# ---------- Extra head: small, theme-friendly styles ---------- #}
+{% block extrahead %}
+  {{ block.super }}
+  <style>
+    /* Keep buttons aligned like native admin tools */
+    .object-tools .button,
+    .object-tools button.button {
+      padding: 6px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color, #d0d7de);
+      background: var(--button-bg, #f6f8fa);
+      color: var(--button-fg, var(--body-fg));
+      text-decoration: none;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .object-tools .button:hover,
+    .object-tools button.button:hover {
+      filter: brightness(0.97);
+    }
+    .object-tools button.default {
+      background: var(--accent, #0b834b);
+      border-color: var(--accent, #084e2d);
+      color: #fff;
+    }
+
+    /* Summary panel */
+    .order-summary {
+      margin: 16px 0 24px;
+      padding: 12px 14px;
+      border: 1px solid var(--border-color, #d0d7de);
+      border-radius: 6px;
+      background: var(--panel-bg, #fff);
+    }
+    .order-summary h3 {
+      margin: 0 0 10px;
+      font-size: 15px;
+      line-height: 1.3;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .summary-grid .kpi {
+      padding: 8px 10px;
+      border: 1px dashed var(--border-color, #d0d7de);
+      border-radius: 6px;
+      background: var(--kpi-bg, rgba(127,127,127,0.05));
+    }
+    .summary-grid .kpi strong { display:block; font-size:12px; opacity:0.8; margin-bottom:4px; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --border-color: #30363d;
+        --button-bg: #21262d;
+        --button-fg: #c9d1d9;
+        --panel-bg: #0d1117;
+        --kpi-bg: rgba(240,246,252,0.03);
+        --accent: #2f81f7;
+      }
+    }
+  </style>
+{% endblock %}
+
+{# ---------- Add our tools next to native ones ---------- #}
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if change and original %}
+    {# Safe reversing: using "as var" prevents NoReverseMatch errors #}
+    {% url 'admin:core_order_generate_pdf' original.id as gen_pdf_url %}
+    {% url 'admin:core_order_send_email' original.id as send_email_url %}
+
+    {% if gen_pdf_url %}
+      <li>
+        <a href="{{ gen_pdf_url }}?mode=inline" target="_blank" class="button">
+          {% trans "Preview PDF" %}
+        </a>
+      </li>
+      <li>
+        <a href="{{ gen_pdf_url }}?mode=download" class="button">
+          {% trans "Download PDF" %}
+        </a>
+      </li>
+    {% endif %}
+
+    {% if send_email_url %}
+      <li>
+        <form action="{{ send_email_url }}" method="post" style="display:inline;">
+          {% csrf_token %}
+          <button type="submit" class="button default">
+            {% trans "Email Invoice" %}
+          </button>
+        </form>
+      </li>
+    {% endif %}
+  {% endif %}
+{% endblock %}
+
+{# ---------- A compact summary below the fields ---------- #}
+{% block after_field_sets %}
+  {{ block.super }}
+  {% if original %}
+    <div class="order-summary module aligned">
+      <h3>{% trans "Order Summary" %}</h3>
+      <div class="summary-grid">
+        <div class="kpi">
+          <strong>{% trans "Invoice No." %}</strong>
+          <div>{{ original.invoice_number|default:"—" }}</div>
+        </div>
+        <div class="kpi">
+          <strong>{% trans "Status" %}</strong>
+          <div>{{ original.get_status_display|default:original.status|default:"—" }}</div>
+        </div>
+        <div class="kpi">
+          <strong>{% trans "Total Amount" %}</strong>
+          <div>{{ original.grand_total|default:"0.00" }}</div>
+        </div>
+        <div class="kpi">
+          <strong>{% trans "Total Paid" %}</strong>
+          <div>{{ original.total_paid|default:"0.00" }}</div>
+        </div>
+        <div class="kpi">
+          <strong>{% trans "Outstanding" %}</strong>
+          <div>{{ original.outstanding_balance|default:"0.00" }}</div>
+        </div>
+        <div class="kpi">
+          <strong>{% trans "Required Material (kg)" %}</strong>
+          <div>{{ original.required_material_kg|default:"0.000" }}</div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+{% endblock %}

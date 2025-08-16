@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Attendance</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#f4f6f9;margin:0;padding:20px}
+    .wrap{max-width:1000px;margin:0 auto}
+    h1{margin:0 0 10px}
+    table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden}
+    th,td{padding:10px;border-bottom:1px solid #eee;text-align:left}
+    th{background:#0366d6;color:#fff}
+    .tag{padding:2px 6px;border-radius:4px;color:#fff;font-size:12px}
+    .P{background:#16a34a}.A{background:#dc2626}.L{background:#f59e0b}.H{background:#3b82f6}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Attendance — {{ date }}</h1>
+  <table>
+    <tr>
+      <th>Employee</th><th>Status</th><th>Hours</th><th>Notes</th>
+    </tr>
+    {% for r in records %}
+    <tr>
+      <td>{{ r.employee.name }}</td>
+      <td><span class="tag {{ r.status }}">{{ r.get_status_display }}</span></td>
+      <td>{{ r.hours_worked }}</td>
+      <td>{{ r.notes }}</td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="4">No attendance marked today.</td></tr>
+    {% endfor %}
+  </table>
+</div>
+</body>
+</html>
