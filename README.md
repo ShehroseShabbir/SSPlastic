@@ -75,16 +75,16 @@ ALLOWED_HOSTS=yourdomain.com,server_ip
 
 🤝 Contributing
 
-Fork the repo
-Create a feature branch (git checkout -b feature/new-stuff)
-Commit changes (git commit -m "Add new stuff")
-Push to branch (git push origin feature/new-stuff)
-Open a Pull Request 🚀
+- Fork the repo
+- Create a feature branch (git checkout -b feature/new-stuff)
+- Commit changes (git commit -m "Add new stuff")
+- Push to branch (git push origin feature/new-stuff)
+- Open a Pull Request 🚀
 
 📜 License
 
-This project is private. All rights reserved.
-For collaboration requests, please contact the repository owner.
+- This project is private. All rights reserved.
+- For collaboration requests, please contact the repository owner.
 
 
 
