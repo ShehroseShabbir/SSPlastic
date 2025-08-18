@@ -11,9 +11,11 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 from datetime import date, datetime
 from calendar import monthrange
-
-
-from .models import Order, MaterialReceipt, Customer
+from math import ceil
+from django.db.models import Sum, Value, Q, DecimalField
+from django.db.models.functions import Coalesce
+from .models import Order, MaterialReceipt, Customer, CustomerMaterialLedger
+from .models_ar import Payment
 from django.core.mail import EmailMessage
 # ---- Optional: pull branding/settings from the singleton SiteSettings ----
 try:
@@ -117,107 +119,131 @@ def _period_bounds(year: int, month: int):
 
 def generate_customer_monthly_statement(customer_id: int, year: int, month: int, user=None) -> str:
     """
-    Build a PDF "Final Bill" (monthly statement) for a customer:
-      - Table 1: all non-draft orders in the month with outstanding > 0
-      - Table 2: all MaterialReceipt entries in the month
+    Monthly statement for a customer:
+      • Table 1: ALL invoices in the month (paid + unpaid) with Paid and Due columns.
+      • Table 2: Payments received during the month (date, method, notes/ref, amount).
+      • Table 3: Material balance summary (Opening, IN, OUT, Closing).
     """
+    # --- Setup & Period ---
     customer = Customer.objects.get(id=customer_id)
     ss = get_site_settings()
-
     period_start, period_end = _period_bounds(year, month)
 
-    # --- Orders in month with due amount > 0 (skip drafts) ---
-    qs = (
-        Order.objects.select_related("customer")
+    # --- Invoices (ALL non-draft in period) ---
+    orders = (
+        Order.objects
+        .select_related("customer")
+        .prefetch_related("payment_allocations__payment")
         .filter(customer=customer, order_date__range=(period_start, period_end))
         .exclude(status="DRAFT")
+        .order_by("order_date", "id")
     )
 
     rows_orders = []
-    grand_total_billed = Decimal("0")
-    grand_total_due = Decimal("0")
-    grand_total_qty = Decimal("0")
+    total_qty   = Decimal("0.000")
+    total_inv   = Decimal("0.00")
+    total_paid  = Decimal("0.00")
+    total_due   = Decimal("0.00")
 
-    for o in qs:
-        size = getattr(o, "roll_size", "") or ""
+    for o in orders:
         qty_kg = dkg(getattr(o, "target_total_kg", 0) or 0)
-        rate = Decimal(str(getattr(o, "price_per_kg", 0) or 0))
+        rate   = Decimal(str(getattr(o, "price_per_kg", 0) or 0))
 
-        subtotal = dmoney(qty_kg * rate)
+        invoice_total = dmoney(o.grand_total)  # use model logic (incl GST if set)
 
-        if ss and ss.tax_rate is not None:
-            tax_rate = Decimal(ss.tax_rate) / Decimal("100")
-            tax_label = ss.tax_label or "Tax"
-        else:
-            tax_rate = Decimal(str(getattr(settings, "TAX_RATE", 0) or 0))
-            tax_label = getattr(settings, "TAX_LABEL", "Tax")
+        # Paid = sum of allocations applied to THIS order
+        allocs = getattr(o, "payment_allocations", None)
+        paid_raw = sum((a.amount or Decimal("0.00")) for a in allocs.all()) if allocs is not None else Decimal("0.00")
+        paid = dmoney(paid_raw)
 
-        if getattr(ss, "include_gst", False):
-            tax_amount = dmoney(subtotal * tax_rate) if tax_rate else Decimal("0.00")
-        else:
-            tax_amount = Decimal("0.00")
-
-        bill_total = dmoney(subtotal + tax_amount)
-
-        paid = dmoney(sum(Decimal(str(getattr(p, "amount", 0) or 0)) for p in o.payments.all()))
-        due = dmoney(bill_total - paid)
-        if due <= 0:
-            continue
-
-        grand_total_billed += bill_total
-        grand_total_due += due
-        grand_total_qty += qty_kg
-
-        dc_no = getattr(o, "delivery_challan", "") or ""
+        due = dmoney(invoice_total - paid)
+        total_qty += qty_kg
+        total_inv += invoice_total
+        total_paid += paid
+        total_due += due
 
         rows_orders.append([
-            str(getattr(o, "delivery_challan_date", "") or ""),
+            str(getattr(o, "delivery_challan_date", "") or getattr(o, "order_date", "") or ""),
             getattr(o, "invoice_number", f"INV{o.id}") or "",
-            str(dc_no),
-            str(size),
+            str(getattr(o, "delivery_challan", "") or ""),
+            str(getattr(o, "roll_size", "") or ""),
             f"{qty_kg:,.3f}",
             f"{rate:,.2f}",
-            f"{bill_total:,.2f}",
+            f"{invoice_total:,.2f}",
+            f"{paid:,.2f}",
             f"{due:,.2f}",
         ])
 
+    # Totals row for invoices
     rows_orders.append([
-        "", "", "", "Grand Total",
-        f"{grand_total_qty:,.3f}",
+        "", "", "", "Totals",
+        f"{total_qty:,.3f}",
         "",
-        f"{grand_total_billed:,.2f}",
-        f"{grand_total_due:,.2f}",
+        f"{total_inv:,.2f}",
+        f"{total_paid:,.2f}",
+        f"{total_due:,.2f}",
     ])
 
-    # --- Material received (IN) for the month ---
-    rec_qs = (
-        MaterialReceipt.objects
-        .filter(customer=customer, date__range=(period_start, period_end))
-        .order_by("date")
+    # --- Payments received in the month ---
+    payments_qs = (
+        Payment.objects
+        .filter(customer=customer, received_on__range=(period_start, period_end))
+        .order_by("received_on", "id")
     )
-    rows_receipts = []
-    total_bags = 0
-    total_kg = Decimal("0")
-    for r in rec_qs:
-        bags = int(getattr(r, "bags_count", 0) or 0)
-        kg = dkg(getattr(r, "total_kg", 0) or 0)
-        total_bags += bags
-        total_kg += kg
-        rows_receipts.append([
-            str(getattr(r, "date", "") or ""),
-            str(bags),
-            f"{kg:,.3f}",
-            getattr(r, "notes", "") or "",
+    rows_payments = []
+    payments_total = Decimal("0.00")
+    for p in payments_qs:
+        amt = dmoney(p.amount or Decimal("0.00"))
+        payments_total += amt
+        note_bits = []
+        if getattr(p, "reference", ""):
+            note_bits.append(str(p.reference))
+        if getattr(p, "notes", ""):
+            note_bits.append(str(p.notes))
+        notes = " · ".join(note_bits)
+        rows_payments.append([
+            str(getattr(p, "received_on", "") or ""),
+            str(getattr(p, "method", "") or ""),
+            notes or "—",
+            f"{amt:,.2f}",
         ])
-    rows_receipts.append(["Total", str(total_bags), f"{total_kg:,.3f}", ""])
+    rows_payments.append(["", "", "Total", f"{payments_total:,.2f}"])
 
-    # --- Common footer refs ---
-    safe_name = "".join(ch for ch in customer.company_name if ch.isalnum() or ch in (" ", "_", "-")).strip()
-    statement_ref = f"Statement-{safe_name}-{year:04d}-{month:02d}"
-    bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
-                  else getattr(settings, "BANK_DETAILS_LINES", []))
+    # --- Material balance summary (Opening, IN, OUT, Closing) ---
+    KG = DecimalField(max_digits=12, decimal_places=3)
 
-    # --- PDF build ---
+    opening_kg = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__lt=period_start)
+        .aggregate(b=Coalesce(Sum("delta_kg"), Value(Decimal("0"), output_field=KG)))
+        .get("b") or Decimal("0")
+    )
+
+    in_month_in_kg = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__range=(period_start, period_end), delta_kg__gt=0)
+        .aggregate(s=Coalesce(Sum("delta_kg"), Value(Decimal("0"), output_field=KG)))
+        .get("s") or Decimal("0")
+    )
+
+    in_month_out_neg = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__range=(period_start, period_end), delta_kg__lt=0)
+        .aggregate(s=Coalesce(Sum("delta_kg"), Value(Decimal("0"), output_field=KG)))
+        .get("s") or Decimal("0")
+    )
+    in_month_out_kg = -in_month_out_neg  # display as positive "used" kg
+
+    closing_kg = opening_kg + in_month_in_kg + in_month_out_neg  # out_neg is negative
+
+    rows_mat_balance = [
+        ["Opening Balance (kg)", f"{dkg(opening_kg):,.3f}"],
+        ["Received IN (kg)",     f"{dkg(in_month_in_kg):,.3f}"],
+        ["Used OUT (kg)",        f"{dkg(in_month_out_kg):,.3f}"],
+        ["Closing Balance (kg)", f"{dkg(closing_kg):,.3f}"],
+    ]
+
+    # --- PDF: header & layout ---
     pdf_path = _statement_path(customer, year, month)
     c = canvas.Canvas(str(pdf_path), pagesize=A4)
     W, H = A4
@@ -225,7 +251,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     right_x = W - margin
     top_y = H - margin
 
-    # Header: logo + company block
+    # Logo / header
     logo_path = None
     if ss and getattr(ss, "logo", None):
         try:
@@ -250,30 +276,29 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
         ss.company_address_list if ss and hasattr(ss, "company_address_list")
         else getattr(settings, "COMPANY_ADDRESS_LINES", [])
     )
-    header_lines = [company_name] + list(_as_lines(company_addr_lines))
-    _draw_multiline_right(c, header_lines, right_x, top_y, leading=14, font="Helvetica", size=10)
+    _draw_multiline_right(c, [company_name] + list(_as_lines(company_addr_lines)),
+                          right_x, top_y, leading=14, font="Helvetica", size=10)
 
-    # Title
+    # Title & meta
     title_y = top_y - (logo_h + 35 if logo_path else 55)
     c.setFont("Helvetica-Bold", 16)
     c.drawCentredString(W/2, title_y, "Customer Monthly Statement")
 
-    # Meta
     meta_y = title_y - 26
     c.setFont("Helvetica", 10)
     c.drawCentredString(W/2, meta_y, f"{customer.company_name}   |   Period: {year:04d}-{month:02d}")
     y = meta_y - 24
 
-    # --- Table 1 ---
+    # --- Table 1: Invoices (All) ---
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, y, "Unpaid / Due Invoices")
+    c.drawString(margin, y, "Invoices (All)")
     y -= 12
 
     orders_table_data = [[
-        "Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Bill Total", "Amount Due"
-    ]] + (rows_orders or [["—"] * 8])
+        "Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Invoice Total", "Paid", "Amount Due"
+    ]] + (rows_orders or [["—"] * 9])
 
-    orders_base_cols = [70, 85, 50, 50, 85, 55, 80, 85]
+    orders_base_cols = [70, 85, 50, 50, 85, 55, 80, 80, 80]
     avail = W - 2 * margin
     scale = min(1.0, avail / float(sum(orders_base_cols)))
     orders_col_widths = [w * scale for w in orders_base_cols]
@@ -290,31 +315,34 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     tw, th = t1.wrapOn(c, W, H)
     x_center = (W - tw) / 2.0
     if y - th < 90:
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=statement_ref, user=user)
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
         c.showPage()
         _draw_page_header(c, W, H, ss)
         y = H - margin
     t1.drawOn(c, x_center, y - th)
     y = y - th - 30
 
-    # --- Table 2 ---
+    # --- Table 2: Payments Received (Month) ---
     if y < 120:
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=statement_ref, user=user)
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
         c.showPage()
         _draw_page_header(c, W, H, ss)
         y = H - margin
 
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, y, "Raw Material Received (IN)")
+    c.drawString(margin, y, "Payments Received (Month)")
     y -= 12
 
-    rec_table = [["Date", "Bags", "Total (kg)", "Notes"]] + (rows_receipts or [["—"] * 4])
-    rec_base_cols = [110, 55, 75, 240]
-    avail = W - 2 * margin
-    scale = min(1.0, avail / float(sum(rec_base_cols)))
-    rec_col_widths = [w * scale for w in rec_base_cols]
+    payments_table = [["Date", "Method", "Notes / Reference", "Amount"]] + (rows_payments or [["—"] * 4])
+    pay_base_cols = [90, 90, 260, 80]
+    scale = min(1.0, (W - 2 * margin) / float(sum(pay_base_cols)))
+    pay_col_widths = [w * scale for w in pay_base_cols]
 
-    t2 = Table(rec_table, colWidths=rec_col_widths, repeatRows=1)
+    t2 = Table(payments_table, colWidths=pay_col_widths, repeatRows=1)
     t2.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -2), 0.5, colors.black),
         ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
@@ -326,18 +354,60 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     tw, th = t2.wrapOn(c, W, H)
     x_center = (W - tw) / 2.0
     if y - th < 90:
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=statement_ref, user=user)
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
         c.showPage()
         _draw_page_header(c, W, H, ss)
         y = H - margin
     t2.drawOn(c, x_center, y - th)
     y = y - th - 30
 
+    # --- Table 3: Material Balance Summary ---
+    if y < 120:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
+        c.showPage()
+        _draw_page_header(c, W, H, ss)
+        y = H - margin
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "Material Balance Summary")
+    y -= 12
+
+    mat_base_cols = [220, 100]
+    scale = min(1.0, (W - 2 * margin) / float(sum(mat_base_cols)))
+    mat_col_widths = [w * scale for w in mat_base_cols]
+
+    t3 = Table(rows_mat_balance, colWidths=mat_col_widths, repeatRows=0)
+    t3.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+    ]))
+
+    tw, th = t3.wrapOn(c, W, H)
+    x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
+        c.showPage()
+        _draw_page_header(c, W, H, ss)
+        y = H - margin
+    t3.drawOn(c, x_center, y - th)
+    y = y - th - 30
+
     # --- Final footer ---
-    _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=statement_ref, user=user)
+    bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                  else getattr(settings, "BANK_DETAILS_LINES", []))
+    _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
 
     c.save()
     return str(pdf_path)
+
 
 
 # ---- End Customer Billing Monthly ------
@@ -439,7 +509,7 @@ def generate_invoice(order_id, user=None, out_path=None):
     order = (
         Order.objects
         .select_related("customer")
-        .prefetch_related("payments")   # no line-items anymore
+        .prefetch_related("payment_allocations__payment")   # <-- allocations + their Payment rows
         .get(id=order_id)
     )
 
@@ -496,8 +566,11 @@ def generate_invoice(order_id, user=None, out_path=None):
     grand_total = dmoney(subtotal + tax_amount)
 
     # Payments
-    payments = list(order.payments.all().order_by("payment_date"))
-    amount_paid = dmoney(sum(_as_decimal(getattr(p, "amount", 0)) for p in payments))
+    try:
+        allocations = list(order.payment_allocations.select_related("payment").order_by("payment__received_on","id"))
+    except Exception:
+        allocations = []
+    amount_paid = dmoney(sum(_as_decimal(getattr(a, "amount", 0)) for a in allocations))
     balance_due = dmoney(grand_total - amount_paid)
     # ---- STATUS STAMP (color-coded) ----
     # Priority:
@@ -615,8 +688,6 @@ def generate_invoice(order_id, user=None, out_path=None):
         _format_money(subtotal),
     ])
 
-    from reportlab.platypus import Table, TableStyle
-    from reportlab.lib import colors
 
     col_widths = [140, 80, 120, 90, 95]
     tbl = Table(data, colWidths=col_widths, repeatRows=1)
@@ -710,37 +781,56 @@ def generate_invoice(order_id, user=None, out_path=None):
     c.drawString(margin, totals_y, f"Polyethylene Bags Balance: {before_balance:,.3f} kg")
     # totals_y -= 14
     # c.drawString(margin, totals_y, f"Material Balance (after this order): {after_balance:,.3f} kg")
-
-    # Payments mini list
-    py_y = totals_y - 20
-    if payments:
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(margin, py_y, "Payments:")
-        py_y -= 14
-        c.setFont("Helvetica", 9)
-        for p in payments:
-            row = f"{p.payment_date}  ·  {getattr(p, 'method', '') or ''}  ·  {_format_money(_as_decimal(getattr(p,'amount',0)))}"
+    footer_y = 60
+    # --- Payments mini list (ensure it sits above footer) ---
+    py_y = max(footer_y + 14, totals_y - 20)  # keep list clear of footer
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(margin, py_y, "Payments:")
+    py_y -= 14
+    c.setFont("Helvetica-Oblique", 9)
+    
+    
+    if allocations:
+        for a in allocations:
+            p = a.payment
+            # safe formatting (date → YYYY-MM-DD)
+            date_str = getattr(p, "received_on", None)
+            try:
+                date_str = date_str.strftime("%Y-%m-%d")
+            except Exception:
+                date_str = str(date_str or "")
+            row = f"{date_str}  ·  {(p.method or '')}  ·  {_format_money(_as_decimal(a.amount))}"
+            if getattr(p, "reference", ""):
+                row += f"  ·  Ref: {p.reference}"
             c.drawString(margin + 10, py_y, row)
             py_y -= 12
+    else:
+        c.drawString(margin + 10, py_y, "—")
+        py_y -= 12
 
     # Footer: payment terms + bank
-    footer_y = 60
-    billing_lines = ["Payment Terms: " + (getattr(order, "payment_terms", "") or "")]
-    if ss and hasattr(ss, "bank_details_list"):
-        bank_lines = ss.bank_details_list
-    else:
-        bank_lines = getattr(settings, "BANK_DETAILS_LINES", [])
+    
+    # --- Common footer refs ---
+    bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                  else getattr(settings, "BANK_DETAILS_LINES", []))
+    _draw_footer(c, W, H, ss, bank_lines=bank_lines, user=user)
+    
+    # billing_lines = ["Payment Terms: " + (getattr(order, "payment_terms", "") or "")]
+    # if ss and hasattr(ss, "bank_details_list"):
+    #     bank_lines = ss.bank_details_list
+    # else:
+    #     bank_lines = getattr(settings, "BANK_DETAILS_LINES", [])
 
-    _draw_multiline_left(c, billing_lines, margin, footer_y + 28, leading=12, font="Helvetica", size=9)
-    _draw_multiline_left(c, bank_lines,   margin, footer_y,        leading=12, font="Helvetica", size=9)
+    # _draw_multiline_left(c, billing_lines, margin, footer_y + 28, leading=12, font="Helvetica", size=9)
+    # _draw_multiline_left(c, bank_lines,   margin, footer_y,        leading=12, font="Helvetica", size=9)
 
-    # Footer stamp
-    who = "System"
-    if user and getattr(user, "is_authenticated", False):
-        who = (user.get_full_name() or user.get_username() or str(user)).strip() or "System"
-    stamp = timezone.localtime().strftime("%Y-%m-%d %H:%M")
-    c.setFont("Helvetica-Oblique", 8)
-    c.drawRightString(W - margin, 30, f"Generated by {who} · {stamp} · {inv_no}")
+    # # Footer stamp
+    # who = "System"
+    # if user and getattr(user, "is_authenticated", False):
+    #     who = (user.get_full_name() or user.get_username() or str(user)).strip() or "System"
+    # stamp = timezone.localtime().strftime("%Y-%m-%d %H:%M")
+    # c.setFont("Helvetica-Oblique", 8)
+    # c.drawRightString(W - margin, 30, f"Generated by {who} · {stamp} · {inv_no}")
 
     c.save()
     return str(pdf_path)

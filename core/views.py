@@ -2,7 +2,8 @@ from django.shortcuts import render, get_object_or_404
 from django.http import HttpResponse
 from collections import defaultdict
 from decimal import Decimal
-from .models import Customer, Order, OrderItem, Expense, Payment, ExpenseCategory, Employee, Attendance, CustomerMaterialLedger
+from .models import Customer, Order, OrderItem, Expense, ExpenseCategory, Employee, Attendance, CustomerMaterialLedger
+from .models_ar import PaymentAllocation
 from .utils import generate_invoice, send_invoice_email
 from django.db.models import (
     Sum, F, Value, ExpressionWrapper, DecimalField, OuterRef, Subquery, Count, Q
@@ -20,21 +21,27 @@ def _orders_with_totals(qs):
         F('roll_weight') * F('quantity') * F('price_per_kg'),
         output_field=MONEY,
     )
+
     items_total_sq = (
-        OrderItem.objects.filter(order_id=OuterRef('pk'))
+        OrderItem.objects
+        .filter(order_id=OuterRef('pk'))
         .values('order_id')
         .annotate(total=Coalesce(Sum(item_amount_expr), Value(0, output_field=MONEY)))
         .values('total')[:1]
     )
-    payments_total_sq = (
-        Payment.objects.filter(order_id=OuterRef('pk'))
+
+    # ✅ use allocations applied to this order
+    allocations_total_sq = (
+        PaymentAllocation.objects
+        .filter(order_id=OuterRef('pk'))
         .values('order_id')
         .annotate(total=Coalesce(Sum('amount'), Value(0, output_field=MONEY)))
         .values('total')[:1]
     )
+
     return qs.annotate(
         total_amount_calc=Coalesce(Subquery(items_total_sq, output_field=MONEY), Value(0, output_field=MONEY)),
-        total_paid_calc=Coalesce(Subquery(payments_total_sq, output_field=MONEY), Value(0, output_field=MONEY)),
+        total_paid_calc=Coalesce(Subquery(allocations_total_sq, output_field=MONEY), Value(0, output_field=MONEY)),
     )
 
 def customer_balances(request):

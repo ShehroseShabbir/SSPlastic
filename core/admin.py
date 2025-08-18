@@ -4,19 +4,27 @@ from django import forms
 from django.core.exceptions import ValidationError
 from django.http import FileResponse, HttpResponseRedirect, HttpResponseBadRequest
 from django.utils.html import format_html
-from pathlib import Path
-from .material_sync import sync_order_material_ledger  # <-- add this at the top
-from .models import Order, OrderItem, OrderRoll, Customer, Payment, ExpenseCategory, Expense, Employee, Attendance, SalaryPayment, MaterialReceipt, CustomerMaterialLedger  # if you have Payment
-from .utils import generate_invoice, send_invoice_email, generate_customer_monthly_statement
 from django.shortcuts import redirect, get_object_or_404
-from decimal import Decimal
-from django.db import models
-from django.db import transaction
-from django.db.models import Sum, F, Value, ExpressionWrapper, DecimalField, Q, Subquery,OuterRef, Case, When
+from django.db.models import Sum, F, Value, ExpressionWrapper, DecimalField, Q
 from django.db.models.functions import Coalesce
-from django.utils.html import format_html
 from django.utils.timezone import now
+
+from pathlib import Path
+from decimal import Decimal
 from calendar import month_name
+
+# ✅ remove the bad absolute import; use relative imports only
+from .material_sync import sync_order_material_ledger
+from .models import (
+    Order, OrderItem, OrderRoll, Customer,
+    ExpenseCategory, Expense, Employee, Attendance,
+    SalaryPayment, MaterialReceipt, CustomerMaterialLedger,
+)
+# ✅ Payment/Allocation live in models_ar, import them from there (not from .models)
+from .models_ar import Payment, PaymentAllocation
+from .ar_utils import auto_apply_fifo
+from .utils import generate_invoice, send_invoice_email, generate_customer_monthly_statement
+
 
 
 KG = DecimalField(max_digits=12, decimal_places=3)
@@ -30,23 +38,6 @@ STATUS_STYLES = {
     "CLOSED":    {"bg": "#d1fae5", "fg": "#064e3b", "bd": "#6ee7b7"},  # emerald
     "CANCELLED": {"bg": "#fee2e2", "fg": "#7f1d1d", "bd": "#fecaca"},  # red
 }
-# def _items_changed(formsets):
-#     """
-#     Returns True if the OrderItem inline had any add/edit/delete in this request.
-#     Works in save_related (post-save) by checking initial/instance deltas.
-#     """
-#     from .models import OrderItem
-#     for fs in formsets:
-#         if getattr(fs, 'model', None) is OrderItem:
-#             # If any form has_changed, or a new instance was created, or marked DELETE
-#             for f in fs.forms:
-#                 if getattr(f, 'cleaned_data', None) and f.cleaned_data.get('DELETE'):
-#                     return True
-#                 if f.instance.pk is None and getattr(f, 'has_changed', lambda: False)():
-#                     return True
-#                 if getattr(f, 'has_changed', lambda: False)():
-#                     return True
-#     return False
 
 def _available_material_kg(customer):
     """
@@ -63,58 +54,248 @@ def _available_material_kg(customer):
 
 
 
-def _orders_with_totals(qs):
+# def _orders_with_totals(qs):
+#     """
+#     Avoid cartesian multiplication by using separate subqueries for item total and payments total.
+#     """
+#     money = DecimalField(max_digits=18, decimal_places=2)
+
+#     # Per-item line total
+#     item_amount_expr = ExpressionWrapper(
+#         F('roll_weight') * F('quantity') * F('price_per_kg'),
+#         output_field=money,
+#     )
+
+#     # Subquery: total of items per order
+#     items_total_sq = (
+#         OrderItem.objects
+#         .filter(order_id=OuterRef('pk'))
+#         .values('order_id')
+#         .annotate(total=Coalesce(Sum(item_amount_expr), Value(0, output_field=money)))
+#         .values('total')[:1]
+#     )
+
+#     # Subquery: total of payments per order
+#     payments_total_sq = (
+#         Payment.objects
+#         .filter(order_id=OuterRef('pk'))
+#         .values('order_id')
+#         .annotate(total=Coalesce(Sum('amount'), Value(0, output_field=money)))
+#         .values('total')[:1]
+#     )
+
+#     return qs.annotate(
+#         total_amount_calc=Coalesce(Subquery(items_total_sq, output_field=money), Value(0, output_field=money)),
+#         total_paid_calc=Coalesce(Subquery(payments_total_sq, output_field=money), Value(0, output_field=money)),
+#     ).annotate(
+#         outstanding_amount_calc=ExpressionWrapper(
+#             F('total_amount_calc') - F('total_paid_calc'),
+#             output_field=money
+#         )
+#     )
+
+#### --------------------------------------
+#### Accounts Recievable Functionality
+#### --------------------------------------
+
+class PaymentSelect(forms.Select):
     """
-    Avoid cartesian multiplication by using separate subqueries for item total and payments total.
+    Select widget that can disable options and style them (strike-through).
+    We pass `disabled_ids` when constructing the widget.
     """
-    money = DecimalField(max_digits=18, decimal_places=2)
+    def __init__(self, *args, disabled_ids=None, **kwargs):
+        self.disabled_ids = set(disabled_ids or [])
+        super().__init__(*args, **kwargs)
 
-    # Per-item line total
-    item_amount_expr = ExpressionWrapper(
-        F('roll_weight') * F('quantity') * F('price_per_kg'),
-        output_field=money,
-    )
+    def create_option(self, name, value, label, selected, index, subindex=None, attrs=None):
+        option = super().create_option(name, value, label, selected, index, subindex=subindex, attrs=attrs)
+        try:
+            pk = int(option.get("value"))
+        except (TypeError, ValueError):
+            pk = None
+        if pk in self.disabled_ids:
+            option.setdefault("attrs", {})
+            option["attrs"]["disabled"] = True
+            option["attrs"]["style"] = "text-decoration: line-through; color:#9ca3af;"
+            # Optional: make it visually clear
+            option["label"] = f"{option['label']} (fully allocated)"
+        return option
 
-    # Subquery: total of items per order
-    items_total_sq = (
-        OrderItem.objects
-        .filter(order_id=OuterRef('pk'))
-        .values('order_id')
-        .annotate(total=Coalesce(Sum(item_amount_expr), Value(0, output_field=money)))
-        .values('total')[:1]
-    )
+class PaymentAllocationForOrderForm(forms.ModelForm):
+    class Meta:
+        model = PaymentAllocation
+        fields = "__all__"
 
-    # Subquery: total of payments per order
-    payments_total_sq = (
-        Payment.objects
-        .filter(order_id=OuterRef('pk'))
-        .values('order_id')
-        .annotate(total=Coalesce(Sum('amount'), Value(0, output_field=money)))
-        .values('total')[:1]
-    )
+    def __init__(self, *args, **kwargs):
+        # parent order object is injected by the inline (below)
+        order_obj = kwargs.pop("order_obj", None)
+        super().__init__(*args, **kwargs)
 
-    return qs.annotate(
-        total_amount_calc=Coalesce(Subquery(items_total_sq, output_field=money), Value(0, output_field=money)),
-        total_paid_calc=Coalesce(Subquery(payments_total_sq, output_field=money), Value(0, output_field=money)),
-    ).annotate(
-        outstanding_amount_calc=ExpressionWrapper(
-            F('total_amount_calc') - F('total_paid_calc'),
-            output_field=money
+        field = self.fields["payment"]
+
+        if not order_obj or not getattr(order_obj, "customer_id", None):
+            # No parent order yet → keep empty; tell the user to save first.
+            field.queryset = Payment.objects.none()
+            field.help_text = "Save the order first to choose customer payments."
+            return
+
+        money = DecimalField(max_digits=18, decimal_places=2)
+
+        # Annotate each Payment with allocated sum so we can filter/label efficiently.
+        qs = (
+            Payment.objects
+            .filter(customer=order_obj.customer)
+            .annotate(
+                allocated=Coalesce(Sum("allocations__amount"), Value(Decimal("0.00"), output_field=money))
+            )
+            .order_by("-received_on", "-id")
         )
+
+        # Build choices + disabled list
+        choices = []
+        disabled_ids = []
+        for p in qs:
+            unapplied = (p.amount or Decimal("0.00")) - (getattr(p, "allocated", Decimal("0.00")) or Decimal("0.00"))
+            label = f"Pmt #{p.id} — Unapplied ${unapplied:,.2f} / Total ${p.amount:,.2f} [{p.method}] on {p.received_on}"
+            choices.append((p.pk, label))
+            if unapplied <= 0:
+                disabled_ids.append(p.pk)
+
+        field.queryset = qs  # validation against real rows
+        field.widget = PaymentSelect(disabled_ids=disabled_ids)
+        field.choices = choices
+        field.help_text = "Pick a payment with remaining unapplied balance."
+
+class PaymentAllocationInline(admin.TabularInline):
+    model = PaymentAllocation
+    extra = 0
+    fields = ("order", "amount", "applied_on",
+              "order_outstanding_now", "payment_unapplied_now")  # + new
+    readonly_fields = ("order_outstanding_now", "payment_unapplied_now")
+    autocomplete_fields = ("order",)
+
+    def order_outstanding_now(self, obj):
+        if not obj or not obj.pk:
+            return "—"
+        # uses your Order.outstanding_balance property
+        return f"{obj.order.outstanding_balance:,.2f}"
+    order_outstanding_now.short_description = "Order Outstanding (now)"
+
+    def payment_unapplied_now(self, obj):
+        if not obj or not obj.pk:
+            return "—"
+        # uses Payment.unapplied_amount property
+        return f"{obj.payment.unapplied_amount:,.2f}"
+    payment_unapplied_now.short_description = "Payment Unapplied (now)"
+
+# in core/admin.py
+
+@admin.register(PaymentAllocation)
+class PaymentAllocationAdmin(admin.ModelAdmin):
+    list_display = (
+        "id", "customer_name", "payment", "order",
+        "amount", "order_outstanding_now", "payment_unapplied_now", "applied_on"
     )
+    list_filter  = ("applied_on", "order__status", "order__customer")
+    search_fields = ("order__invoice_number", "payment__reference", "order__customer__company_name")
+    ordering = ("-applied_on", "-id")
+    list_per_page = 50
+
+    def customer_name(self, obj):
+        return getattr(obj.order.customer, "company_name", "")
+    customer_name.short_description = "Customer"
+
+    def order_outstanding_now(self, obj):
+        return f"{obj.order.outstanding_balance:,.2f}"
+    order_outstanding_now.short_description = "Order Outstanding (now)"
+
+    def payment_unapplied_now(self, obj):
+        return f"{obj.payment.unapplied_amount:,.2f}"
+    payment_unapplied_now.short_description = "Payment Unapplied (now)"
+
+
+@admin.register(Payment)
+class PaymentAdmin(admin.ModelAdmin):
+    list_display = ("id", "customer", "received_on", "method", "reference",
+                    "amount", "allocated_amount", "unapplied_amount")
+    list_filter = ("method", "received_on", "customer")
+    search_fields = ("reference", "customer__company_name")
+    inlines = [PaymentAllocationInline]
+    actions = ["auto_apply_selected"]
+    ordering = ("-received_on", "-id")
+    list_per_page = 50
+
+class OrderAllocationInlineReadonly(admin.TabularInline):
+    model = PaymentAllocation
+    extra = 0
+    can_delete = False
+    # show helpful columns
+    fields = ("payment_link", "amount", "applied_on", "order_outstanding_now", "payment_unapplied_now")
+    readonly_fields = ("payment_link", "amount", "applied_on", "order_outstanding_now", "payment_unapplied_now")
+
+    def has_add_permission(self, request, obj=None):
+        # no blank form rows -> avoids "this field is required"
+        return False
+
+    # pretty link to the payment
+    def payment_link(self, obj):
+        if not obj.pk:
+            return "—"
+        url = reverse("admin:core_payment_change", args=[obj.payment_id])
+        return format_html('<a href="{}">Pmt #{}</a>', url, obj.payment_id)
+    payment_link.short_description = "Payment"
+
+    # the two convenience “remaining” columns you already added
+    def order_outstanding_now(self, obj):
+        return f"{obj.order.outstanding_balance:,.2f}"
+    order_outstanding_now.short_description = "Order Outstanding (now)"
+
+    def payment_unapplied_now(self, obj):
+        return f"{obj.payment.unapplied_amount:,.2f}"
+    payment_unapplied_now.short_description = "Payment Unapplied (now)"
+
+
+## NOT IN USE ANYMORE
+class OrderAllocationInline(admin.TabularInline):
+    model = PaymentAllocation
+    extra = 0
+    fields = ("payment", "amount", "applied_on")
+    # Remove autocomplete so our custom widget/labels show up
+    # autocomplete_fields = ("payment",)
+
+    # show the two convenience columns you added earlier (optional)
+    readonly_fields = ()
+    ordering = ("-applied_on", "-id")
+
+    def get_formset(self, request, obj=None, **kwargs):
+        """
+        Inject the parent order (obj) into the form so we can scope payments to the same customer
+        and compute unapplied/total labels.
+        """
+        parent_order = obj
+
+        class _Form(PaymentAllocationForOrderForm):
+            def __init__(self2, *args, **kw):
+                kw["order_obj"] = parent_order
+                super().__init__(*args, **kw)
+
+        kwargs["form"] = _Form
+        return super().get_formset(request, obj, **kwargs)
+#### --------------------------------------
+#### END Accounts Recievable Functionality
+#### --------------------------------------
+class CustomerPaymentInline(admin.TabularInline):
+    model = Payment   # from models_ar
+    extra = 0
+    fields = ('received_on', 'amount', 'method', 'reference', 'notes')
+    ordering = ('-received_on',)
+
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
     change_form_template = "core/admin/core/customer/change_form.html"
-    list_display = (
-        "company_name",
-        "contact_name",
-        "email",
-        "total_production_display",        # == material used (OUT)
-        "total_available_material_display",# IN - OUT
-    )
+    list_display = ("company_name", "ar_invoices_total", "ar_allocations_total", "ar_unapplied_payments", "ar_pending_balance", "ar_net_position", "total_production_display", "total_available_material_display")
     search_fields = ("company_name", "contact_name", "phone", "email")
     ordering = ("company_name",)
-
     def get_urls(self):
         urls = super().get_urls()
         my_urls = [
@@ -157,21 +338,42 @@ class CustomerAdmin(admin.ModelAdmin):
     def change_view(self, request, object_id, form_url="", extra_context=None):
         extra_context = extra_context or {}
 
-        # Build context for the month/year dropdowns
+        # ----- Month/Year dropdown context -----
         today = now().date()
         months = [(i, month_name[i]) for i in range(1, 13)]
-        # years list: last 5 years to next 1 year (tweak as you like)
         years = list(range(today.year - 5, today.year + 2))
 
-        download_url = reverse("admin:core_customer_download_statement", args=[object_id])
-        extra_context.update({
-            "statement_download_url": download_url,
-            "months": months,
-            "years": years,
-            "default_month": int(request.GET.get("month", today.month)),
-            "default_year": int(request.GET.get("year", today.year)),
-        })
+        default_month = int(request.GET.get("month", today.month))
+        default_year  = int(request.GET.get("year",  today.year))
 
+        download_url = reverse("admin:core_customer_download_statement", args=[object_id])
+
+        # Build filtered changelist links
+        cash_ledger_url = (
+            reverse("admin:core_payment_changelist")
+            + f"?customer__id__exact={object_id}"
+        )
+        material_ledger_url = (
+            reverse("admin:core_customermaterialledger_changelist")
+            + f"?customer__id__exact={object_id}"
+        )
+        allocation_ledger_url = (
+            reverse("admin:core_paymentallocation_changelist")
+            + f"?order__customer__id__exact={object_id}"
+        )
+
+        extra_context.update({
+        # statement widget
+        "statement_download_url": download_url,
+        "months": months,
+        "years": years,
+        "default_month": default_month,
+        "default_year": default_year,
+        # ledgers
+        "cash_ledger_url": cash_ledger_url,
+        "material_ledger_url": material_ledger_url,
+        "allocation_ledger_url": allocation_ledger_url,
+    })
         return super().change_view(request, object_id, form_url, extra_context=extra_context)
     
     def get_queryset(self, request):
@@ -218,71 +420,6 @@ class CustomerAdmin(admin.ModelAdmin):
     total_available_material_display.short_description = "Available Material"
     total_available_material_display.admin_order_field = "available_kg"
     
-class PaymentInlineFormset(forms.BaseInlineFormSet):
-    def clean(self):
-        super().clean()
-
-        # If we're creating a NEW order (no PK yet), we cannot safely
-        # compute existing payments/outstanding. Just validate amounts > 0,
-        # and skip the overpayment total check for now.
-        order = getattr(self, "instance", None)
-        if not order or not order.pk:
-            for form in self.forms:
-                if not hasattr(form, "cleaned_data"):
-                    continue
-                if form.cleaned_data.get("DELETE"):
-                    continue
-                amt = form.cleaned_data.get("amount")
-                if amt is None or Decimal(amt) <= 0:
-                    raise ValidationError("Payment amount must be greater than 0.")
-            return  # <-- important: skip cumulative overpay check on add
-
-        # ---- Existing logic for change view (order has PK) ----
-        from decimal import Decimal
-        from django.db.models import DecimalField, Sum
-
-        # existing payments excluding ones being edited/deleted now
-        editing_ids = set()
-        for form in self.forms:
-            if not hasattr(form, "cleaned_data"):
-                continue
-            if form.cleaned_data.get("DELETE"):
-                continue
-            if form.instance and form.instance.pk:
-                editing_ids.add(form.instance.pk)
-
-        existing_qs = order.payments.all()
-        if editing_ids:
-            existing_qs = existing_qs.exclude(pk__in=editing_ids)
-
-        existing_paid = sum(Decimal(p.amount or 0) for p in existing_qs)
-
-        batch_total = Decimal("0")
-        for form in self.forms:
-            if not hasattr(form, "cleaned_data"):
-                continue
-            if form.cleaned_data.get("DELETE"):
-                continue
-            amt = form.cleaned_data.get("amount") or Decimal("0")
-            if Decimal(amt) <= 0:
-                raise ValidationError("Payment amount must be greater than 0.")
-            batch_total += Decimal(amt)
-
-        order_total = Decimal(order.total_amount or 0)
-        if existing_paid + batch_total > order_total:
-            raise ValidationError(
-                f"Overpayment: total would be {(existing_paid + batch_total):,.2f} "
-                f"on an order of {order_total:,.2f}. Reduce the payment amount(s)."
-            )
-
-class PaymentInline(admin.TabularInline):
-    model = Payment
-    formset = PaymentInlineFormset
-    extra = 0
-    fields = ('payment_date', 'amount', 'payment_method', 'notes')  # method + notes now exist
-    readonly_fields = ('payment_date',)
-    ordering = ('-payment_date',)
-
 class PaymentStatusFilter(admin.SimpleListFilter):
     title = 'Payment Status'
     parameter_name = 'payment_status'
@@ -313,12 +450,18 @@ class MaterialReceiptAdmin(admin.ModelAdmin):
     list_display = ('customer', 'date', 'bags_count', 'extra_kg', 'total_kg', 'notes')
     list_filter = ('customer', 'date')
     search_fields = ('customer__company_name', 'notes')
+    date_hierarchy = 'date'
+    ordering = ('-date', '-id')
+    list_per_page = 50
 
 @admin.register(CustomerMaterialLedger)
 class CustomerMaterialLedgerAdmin(admin.ModelAdmin):
-    list_display = ('customer', 'date', 'type', 'delta_kg', 'order', 'receipt', 'memo')
-    list_filter = ('type', 'customer', 'date')
+    list_display  = ('customer', 'date', 'type', 'delta_kg', 'order', 'receipt', 'memo')
+    list_filter   = ('type', 'customer', 'date')
     search_fields = ('customer__company_name', 'memo')
+    date_hierarchy = 'date'
+    ordering = ('-date', '-id')
+    list_per_page = 50
 
 
 # -------------------------
@@ -330,52 +473,51 @@ class OrderItemInlineFormSet(forms.BaseInlineFormSet):
     Validates that the customer has enough raw material for the NEW total of this order
     using the inline values submitted in this request (no second save/reopen needed).
     """
-def clean(self):
-    super().clean()
-    if any(self.errors):
-        return
+    def clean(self):
+        super().clean()
+        if any(self.errors):
+            return
 
-    order = self.instance
-    customer = getattr(order, 'customer', None)
-    if not customer:
-        return  # main form will require a customer
+        order = self.instance
+        customer = getattr(order, 'customer', None)
+        if not customer:
+            return  # main form will require a customer
 
-    # 1) Proposed total kg from the posted rows (ignore DELETE)
-    proposed_total_kg = Decimal('0')
-    for form in self.forms:
-        if not hasattr(form, "cleaned_data"):
-            continue
-        cd = form.cleaned_data
-        if cd.get("DELETE"):
-            continue
-        w = cd.get("roll_weight") or Decimal('0')
-        q = cd.get("quantity") or 0
-        # ensure Decimal math
-        w = w if isinstance(w, Decimal) else Decimal(str(w))
-        q = Decimal(str(q))
-        proposed_total_kg += (w * q)
+        # 1) Proposed total kg from the posted rows (ignore DELETE)
+        proposed_total_kg = Decimal('0')
+        for form in self.forms:
+            if not hasattr(form, "cleaned_data"):
+                continue
+            cd = form.cleaned_data
+            if cd.get("DELETE"):
+                continue
+            w = cd.get("roll_weight") or Decimal('0')
+            q = cd.get("quantity") or 0
+            w = w if isinstance(w, Decimal) else Decimal(str(w))
+            q = Decimal(str(q))
+            proposed_total_kg += (w * q)
 
-    # 2) Previously saved total kg for this order (DB)
-    previous_total_kg = Decimal('0')
-    if order.pk:
-        kg_expr = ExpressionWrapper(
-            Coalesce(F('roll_weight'), Value(Decimal('0'))) *
-            Coalesce(F('quantity'), Value(0)),
-            output_field=KG
-        )
-        previous_total_kg = (
-            OrderItem.objects
-            .filter(order=order)
-            .aggregate(total=Coalesce(Sum(kg_expr), Value(Decimal('0'), output_field=KG)))
-        )['total'] or Decimal('0')
+        # 2) Previously saved total kg for this order (DB)
+        previous_total_kg = Decimal('0')
+        if order.pk:
+            kg_expr = ExpressionWrapper(
+                Coalesce(F('roll_weight'), Value(Decimal('0'))) *
+                Coalesce(F('quantity'), Value(0)),
+                output_field=KG
+            )
+            previous_total_kg = (
+                OrderItem.objects
+                .filter(order=order)
+                .aggregate(total=Coalesce(Sum(kg_expr), Value(Decimal('0'), output_field=KG)))
+            )['total'] or Decimal('0')
 
-    # 3) Net change requested now
-    delta_kg = proposed_total_kg - previous_total_kg
+        # 3) Net change requested now
+        delta_kg = proposed_total_kg - previous_total_kg
 
-    # 4) Available material (Decimal)
-    avail_kg = _available_material_kg(customer)
+        # 4) Available material (Decimal)
+        avail_kg = _available_material_kg(customer)
 
-    if delta_kg > 0 and delta_kg > avail_kg:
+        if delta_kg > 0 and delta_kg > avail_kg:
             raise ValidationError(
                 f"Not enough raw material to cover this change. "
                 f"Additional needed: {delta_kg:.3f} kg, available: {avail_kg:.3f} kg."
@@ -387,28 +529,20 @@ class OrderRollInline(admin.TabularInline):
     fields = ("weight_kg", "barcode", "created_at")
     readonly_fields = ("created_at",)
 
+class OrderItemInline(admin.TabularInline):
+    model = OrderItem
+    formset = OrderItemInlineFormSet
+    extra = 0
+    fields = ("roll_weight", "quantity", "price_per_kg")
+
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
     change_form_template = 'core/order_change_form.html'
     formset = OrderItemInlineFormSet,
-    list_display = (
-        "invoice_number",
-        "customer",
-        "colored_status",
-        "target_total_kg",
-        "price_per_kg",
-        "produced_kg",
-        "remaining_kg",
-        "subtotal_display",
-        "tax_display",
-        "grand_total_display",
-        "total_paid_display",
-        "outstanding_display",
-    )
-    
+    list_display = ("invoice_number", "customer", "status", "grand_total", "total_allocated", "outstanding_balance")
     list_filter = ("status", "customer")
     search_fields = ("customer__company_name", "invoice_number")
-    inlines = [OrderRollInline, PaymentInline]
+    inlines = [OrderRollInline, OrderAllocationInlineReadonly]
     actions = ["include_gst_on", "include_gst_off"]
     fieldsets = (
         ("Customer & Terms", {"fields": ("customer", "payment_terms", "delivery_date",)}),
@@ -530,7 +664,7 @@ class OrderAdmin(admin.ModelAdmin):
         if not order:
             self.message_user(request, "Order not found.", level=messages.ERROR)
             return redirect("admin:core_order_changelist")
-        if new_status not in dict(Order.STATUS):
+        if new_status not in dict(Order.STATUS_CHOICES):
             self.message_user(request, "Invalid status.", level=messages.ERROR)
             return redirect("admin:core_order_change", object_id=order_id)
         order.status = new_status
@@ -644,11 +778,8 @@ class SalaryPaymentAdmin(admin.ModelAdmin):
     search_fields = ('employee__name',)
     date_hierarchy = 'payment_date'
 
+from .models import SiteSettings  # keep your other imports
 
-# core/admin.py
-from decimal import Decimal
-from django.contrib import admin
-from .models import SiteSettings, Customer  # keep your other imports
 
 class SiteSettingsAdmin(admin.ModelAdmin):
     fieldsets = (
@@ -658,5 +789,6 @@ class SiteSettingsAdmin(admin.ModelAdmin):
         ("Email (optional)", {"fields": ("email_host", "email_port", "email_use_tls", "email_host_user", "email_host_password"), "classes": ("collapse",)}),
     )
     list_display = ("company_name", "tax_label", "tax_rate")
-# admin.site.register(Payment)  # if not already
+
+
 

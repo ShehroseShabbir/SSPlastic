@@ -1,8 +1,15 @@
+{# core/templates/core/admin/core/customer/change_form.html #}
 {% extends "admin/change_form.html" %}
 
 {% block object-tools-items %}
-    {{ block.super }}
-    {% if download_statement_button %}
-        <li>{{ download_statement_button|safe }}</li>
-    {% endif %}
+  {{ block.super }}
+  {% if cash_ledger_url %}
+    <li><a class="button" href="{{ cash_ledger_url }}">Cash Ledger</a></li>
+  {% endif %}
+  {% if allocation_ledger_url %}
+    <li><a class="button" href="{{ allocation_ledger_url }}">AR Allocations</a></li>
+  {% endif %}
+  {% if material_ledger_url %}
+    <li><a class="button" href="{{ material_ledger_url }}">Material Ledger</a></li>
+  {% endif %}
 {% endblock %}

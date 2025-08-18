@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.utils import timezone
 from django.db.models import Sum, Q, UniqueConstraint
 from django.conf import settings
+from .models_ar import FINAL_STATES
 
 TWOPLACES = Decimal('0.01')
 
@@ -100,6 +101,43 @@ class Customer(models.Model):
     phone = models.CharField(max_length=20, blank=True)  # validate by country
     email = models.EmailField(blank=True)
     address = models.TextField(blank=True)  
+
+    @property
+    def ar_invoices_total(self) -> Decimal:
+        """
+        Sum of billable (final-state) invoices using the Order.grand_total PROPERTY.
+        Must be computed in Python, not via DB aggregation.
+        """
+        total = Decimal("0.00")
+        qs = self.orders.filter(status__in=FINAL_STATES).select_related("customer").prefetch_related("rolls")
+        for o in qs:
+            total += (o.grand_total or Decimal("0.00"))
+        return total.quantize(Decimal("0.01"))
+
+    @property
+    def ar_allocations_total(self) -> Decimal:
+        # this one is fine (amount is a real field)
+        from .models_ar import PaymentAllocation
+        agg = PaymentAllocation.objects.filter(
+            order__customer=self,
+            order__status__in=FINAL_STATES
+        ).aggregate(s=Sum("amount"))
+        return (Decimal(agg["s"] or 0)).quantize(Decimal("0.01"))
+
+    @property
+    def ar_unapplied_payments(self) -> Decimal:
+        total = Decimal("0.00")
+        for p in self.payments_ar.all():
+            total += (p.unapplied_amount or Decimal("0.00"))
+        return total.quantize(Decimal("0.01"))
+
+    @property
+    def ar_pending_balance(self) -> Decimal:
+        return (self.ar_invoices_total - self.ar_allocations_total).quantize(Decimal("0.01"))
+
+    @property
+    def ar_net_position(self) -> Decimal:
+        return (self.ar_pending_balance - self.ar_unapplied_payments).quantize(Decimal("0.01"))
 
     @property
     def material_balance_kg(self):
@@ -225,13 +263,18 @@ class Order(models.Model):
         return self.subtotal
 
     @property
+    def total_allocated(self) -> Decimal:
+        agg = self.payment_allocations.aggregate(s=Sum("amount"))
+        return (Decimal(agg["s"] or 0)).quantize(Decimal("0.01"))
+
+    @property
     def total_paid(self) -> Decimal:
-        total = sum((p.amount or Decimal("0")) for p in self.payments.all())
-        return (Decimal(total)).quantize(Decimal("0.01"))
+        # Backward-compatible alias: now it's “allocated to this order”
+        return self.total_allocated
 
     @property
     def outstanding_balance(self) -> Decimal:
-        return (self.grand_total - self.total_paid).quantize(Decimal("0.01"))
+        return (self.grand_total - self.total_allocated).quantize(Decimal("0.01"))
 
     # ----------------- Validation (read-only) -----------------
 
@@ -290,7 +333,7 @@ class Order(models.Model):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"Order {self.id} - {getattr(self.customer, 'company_name', self.customer_id)}"
+        return f"Order {self.invoice_number} - {getattr(self.customer, 'company_name', self.customer_id)}"
 
 class OrderRoll(models.Model):
     """
@@ -334,47 +377,7 @@ class OrderItem(models.Model):
     def __str__(self):
         return f"Roll {self.roll_size} - {self.current_type}"
 
-# Payment
-class Payment(models.Model):
-    METHOD_CHOICES = [
-        ('Cash', 'Cash'),
-        ('Bank Transfer', 'Bank Transfer'),
-        ('Cheque', 'Cheque'),
-    ]
-    order = models.ForeignKey('Order', on_delete=models.CASCADE, related_name='payments')
-    payment_date = models.DateField(auto_now_add=True)
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
-    payment_method = models.CharField(max_length=20, choices=METHOD_CHOICES, default='Cash')  # NEW (or keep payment_method)
-    notes = models.CharField(max_length=255, blank=True)  # NEW
 
-    def __str__(self):
-        return f"{self.order} · {self.amount} ({self.payment_method})"
-    
-    def clean(self):
-        amt = Decimal(self.amount or 0)
-        if amt <= 0:
-            raise ValidationError("Payment amount must be greater than 0.")
-
-        if not self.order_id:
-            return  # nothing to compare yet
-
-        qs = self.order.payments.all()
-        if self.pk:
-            qs = qs.exclude(pk=self.pk)
-
-        already_paid = sum((p.amount or 0) for p in qs)
-        total_after_this = Decimal(already_paid) + amt
-        if total_after_this > self.order.total_amount:
-            raise ValidationError(
-                f"Overpayment: this order’s total is {self.order.total_amount:,.2f}; "
-                f"already paid {Decimal(already_paid):,.2f}. "
-                f"Your payment would exceed the total."
-            )
-    def save(self, *args, **kwargs):
-        # Ensure clean() runs even if admin form skips it
-        self.full_clean()
-        return super().save(*args, **kwargs)
-    
 # -------------------------
 # EXPENSES
 # -------------------------
