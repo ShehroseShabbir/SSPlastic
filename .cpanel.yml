@@ -1,9 +1,69 @@
 deployment:
   tasks:
-    - 'echo "===== cPanel Hello World deploy: $(date) ====="'
-    - 'mkdir -p /home/techaren/public_html/deploy-tests'
+    - 'set -e'
+
+    # ----- Meta -----
+    - 'echo "===== cPanel deploy: $(date) ====="'
+    - 'echo "Repo: $PWD"'
+    - 'BRANCH=$(git rev-parse --abbrev-ref HEAD)'
+    - 'COMMIT=$(git rev-parse --short HEAD)'
+    - 'echo "Branch=$BRANCH  Commit=$COMMIT"'
+
+    # ----- Paths (check once) -----
+    - 'DEV_APP_ROOT=/home/kamranen/dev.backoffice'
+    - 'PROD_APP_ROOT=/home/kamranen/backoffice'
+    - 'PYVER=3.10'
+
+    # Decide target by branch
     - |
-      echo "Hello from cPanel deploy at $(date)
-      Branch: $(git rev-parse --abbrev-ref HEAD)
-      Commit: $(git rev-parse --short HEAD)" \
-      > /home/techaren/public_html/deploy-tests/hello.txt
+      if [ "$BRANCH" = "develop" ] || [ "$BRANCH" = "dev" ]; then
+        TARGET="$DEV_APP_ROOT"
+        VENV="/home/kamranen/virtualenv/dev.backoffice/$PYVER/bin/activate"
+        ENV_NAME="dev"
+      elif [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+        TARGET="$PROD_APP_ROOT"
+        VENV="/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate"
+        ENV_NAME="prod"
+      else
+        echo "Branch '$BRANCH' not configured for deployment. Skipping."
+        exit 0
+      fi
+      echo "Deploying to $TARGET (env=$ENV_NAME)"
+
+    # Ensure target exists (cPanel should have created it)
+    - 'mkdir -p "$TARGET"'
+
+    # Rsync repo → app root (keep media/staticfiles generated on server)
+    - |
+      /bin/rsync -a --delete \
+        --exclude ".git" \
+        --exclude ".github" \
+        --exclude ".cpanel.yml" \
+        --exclude "__pycache__" \
+        --exclude "node_modules" \
+        --exclude "staticfiles" \
+        --exclude "media" \
+        ./ "$TARGET/"
+
+    # Optional: switch .env symlink per env if present on server
+    - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
+
+    # Activate the correct cPanel virtualenv and install deps
+    - 'source "$VENV"'
+    - 'python -m pip install --upgrade pip wheel setuptools'
+    - '[ -f "$TARGET/requirements.txt" ] && pip install -r "$TARGET/requirements.txt" || true'
+
+    # Django maintenance
+    - 'cd "$TARGET"'
+    - 'python manage.py migrate --noinput'
+    - 'python manage.py collectstatic --noinput'
+    - |
+      if [ "$ENV_NAME" = "prod" ]; then
+        echo "Running production checks…"
+        python manage.py check --deploy || true
+      fi
+
+    # Restart Passenger
+    - 'mkdir -p "$TARGET/tmp"'
+    - 'touch "$TARGET/tmp/restart.txt"'
+    - 'echo "===== deploy finished: $BRANCH → $TARGET ====="'
