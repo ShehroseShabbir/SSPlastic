@@ -1,0 +1,27 @@
+deployment:
+  tasks:
+    # Print some context to the deploy log
+    - 'echo "===== cPanel Hello World deploy: $(date) ====="'
+    - 'echo "Repo path: $PWD"'
+    - 'echo "User: $(whoami)"'
+    - 'echo "Branch: $(git rev-parse --abbrev-ref HEAD)"'
+    - 'echo "Commit: $(git rev-parse --short HEAD)"'
+
+    # Create a scratch folder and drop a timestamped file
+    - 'mkdir -p /home/techaren/deploy-tests'
+    - |
+      echo "Hello from cPanel deploy!
+      Date: $(date)
+      Branch: $(git rev-parse --abbrev-ref HEAD)
+      Commit: $(git rev-parse --short HEAD)
+      Repo: $PWD" > /home/techaren/deploy-tests/hello-$(date +%Y%m%d-%H%M%S).txt
+
+    # Write a file under public_html so you can verify via browser
+    - |
+      echo "Hello from cPanel deploy at $(date)
+      Branch: $(git rev-parse --abbrev-ref HEAD)
+      Commit: $(git rev-parse --short HEAD)" > /home/techaren/public_html/cpanel-deploy-test.txt
+
+    # Show what got created (appears in the deploy log)
+    - 'ls -la /home/techaren/deploy-tests || true'
+    - 'echo "===== deploy finished ====="'
