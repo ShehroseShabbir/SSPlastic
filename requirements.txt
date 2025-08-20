@@ -4,3 +4,5 @@ Flask-WTF
 email-validator
 reportlab
 Flask-Mail
+Django
+mysqlclient
