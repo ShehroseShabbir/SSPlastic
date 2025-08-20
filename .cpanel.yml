@@ -8,7 +8,7 @@ deployment:
 
     # ---- paths & python version (change PYVER if needed) ----
     - 'PYVER=3.10'
-    - 'DEV_APP_ROOT=/home/kamranen/dev.backoffice'
+    - 'DEV_APP_ROOT=/home/kamranen/backoffice_dev'
     - 'PROD_APP_ROOT=/home/kamranen/backoffice'
     - 'DEV_VENV=/home/kamranen/virtualenv/dev.backoffice/$PYVER/bin/activate'
     - 'PROD_VENV=/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate'
