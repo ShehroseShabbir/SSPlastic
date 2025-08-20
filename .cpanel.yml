@@ -6,7 +6,7 @@ deployment:
     - 'BRANCH=$(git rev-parse --abbrev-ref HEAD || true)'
     - 'echo "BRANCH=$BRANCH"'
 
-    # ---- paths & python version (adjust PYVER if needed) ----
+    # ---- paths & python version (change PYVER if needed) ----
     - 'PYVER=3.10'
     - 'DEV_APP_ROOT=/home/kamranen/dev.backoffice'
     - 'PROD_APP_ROOT=/home/kamranen/backoffice'
@@ -29,18 +29,43 @@ deployment:
       esac
       echo "TARGET=$TARGET"; echo "VENV=$VENV"; echo "ENV=$ENV_NAME"
 
-    # ---- prepare target; keep media/staticfiles; copy repo via tar (no rsync needed) ----
-    - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles"'
-    - 'echo "Cleaning TARGET (except media/staticfiles)..."'
-    - 'find "$TARGET" -mindepth 1 -maxdepth 1 ! -name media ! -name staticfiles -exec rm -rf {} +'
-    - 'echo "Copying repo -> TARGET via tar..."'
+    # ---- prepare target; KEEP important files/dirs (envs, wsgi, .htaccess, media/staticfiles/tmp) ----
+    - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles" "$TARGET/tmp"'
+    - 'echo "Cleaning TARGET (preserving media/staticfiles/tmp/.env*/passenger_wsgi.py/.htaccess)..."'
+    - |
+      find "$TARGET" -mindepth 1 -maxdepth 1 \
+        ! -name media \
+        ! -name staticfiles \
+        ! -name tmp \
+        ! -name ".env" \
+        ! -name ".env.dev" \
+        ! -name ".env.prod" \
+        ! -name "passenger_wsgi.py" \
+        ! -name ".htaccess" \
+        -exec rm -rf {} +
+
+    # ---- copy repo -> TARGET via tar ----
+    - 'echo "Copying repo into TARGET..."'
     - |
       tar --exclude='.git' --exclude='.github' --exclude='.cpanel.yml' \
           --exclude='__pycache__' --exclude='node_modules' \
           --exclude='staticfiles' --exclude='media' \
           -cf - . | (cd "$TARGET" && tar -xf -)
-    - 'echo "Listing TARGET:"'
-    - 'ls -la "$TARGET" | head -200'
+
+    # ---- ensure passenger_wsgi.py exists (safety net if user removed it) ----
+    - |
+      if [ ! -f "$TARGET/passenger_wsgi.py" ]; then
+        echo "passenger_wsgi.py missing; creating a default one..."
+        cat > "$TARGET/passenger_wsgi.py" <<'PYWSGI'
+
+        import os, sys, pathlib
+        BASE_DIR = pathlib.Path(__file__).resolve().parent
+        sys.path.insert(0, str(BASE_DIR))
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", os.getenv("DJANGO_SETTINGS_MODULE", "polyroll_mgmt.settings"))
+        from django.core.wsgi import get_wsgi_application
+        application = get_wsgi_application()
+        PYWSGI
+      fi
 
     # ---- optional: switch env file (.env.dev/.env.prod on server) ----
     - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
@@ -61,6 +86,5 @@ deployment:
       fi
 
     # ---- restart Passenger ----
-    - 'mkdir -p "$TARGET/tmp"'
     - 'touch "$TARGET/tmp/restart.txt"'
     - 'echo "===== deploy finished ====="'
