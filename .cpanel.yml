@@ -1,41 +1,49 @@
 deployment:
   tasks:
-    - 'set -e'
+    - 'set -euxo pipefail'
 
-    # ----- Meta -----
+    # Context
     - 'echo "===== cPanel deploy: $(date) ====="'
-    - 'echo "Repo: $PWD"'
-    - 'BRANCH=$(git rev-parse --abbrev-ref HEAD)'
-    - 'COMMIT=$(git rev-parse --short HEAD)'
-    - 'echo "Branch=$BRANCH  Commit=$COMMIT"'
+    - 'echo "PWD: $PWD"'
+    - 'echo "USER: $(whoami)"'
+    - 'echo "BRANCH: $(git rev-parse --abbrev-ref HEAD || true)"'
+    - 'echo "FILES AT REPO ROOT:"; ls -la'
 
-    # ----- Paths (check once) -----
+    # Config
+    - 'PYVER=3.10'
     - 'DEV_APP_ROOT=/home/kamranen/dev.backoffice'
     - 'PROD_APP_ROOT=/home/kamranen/backoffice'
-    - 'PYVER=3.10'
 
-    # Decide target by branch
+    # Decide target by repo path
     - |
-      if [ "$BRANCH" = "develop" ] || [ "$BRANCH" = "dev" ]; then
-        TARGET="$DEV_APP_ROOT"
-        VENV="/home/kamranen/virtualenv/dev.backoffice/$PYVER/bin/activate"
-        ENV_NAME="dev"
-      elif [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
-        TARGET="$PROD_APP_ROOT"
-        VENV="/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate"
-        ENV_NAME="prod"
-      else
-        echo "Branch '$BRANCH' not configured for deployment. Skipping."
-        exit 0
-      fi
-      echo "Deploying to $TARGET (env=$ENV_NAME)"
+      case "$PWD" in
+        */repositories/backoffice-dev)
+          TARGET="$DEV_APP_ROOT"; ENV_NAME="dev"
+          ;;
+        */repositories/backoffice-prod)
+          TARGET="$PROD_APP_ROOT"; ENV_NAME="prod"
+          ;;
+        *)
+          echo "Unknown repo path ($PWD). Check cPanel repo path." >&2
+          exit 1
+          ;;
+      esac
+      echo "TARGET=$TARGET (env=$ENV_NAME)"
 
-    # Ensure target exists (cPanel should have created it)
+    # Sanity: show target dir existence and perms
+    - 'echo "Target exists?"; if [ -d "$TARGET" ]; then echo "YES"; else echo "NO (will create)"; fi'
     - 'mkdir -p "$TARGET"'
+    - 'echo "Target owner/perm:"; ls -ld "$TARGET"'
 
-    # Rsync repo → app root (keep media/staticfiles generated on server)
+    # Write a marker file so we can see if we can write to TARGET
+    - 'date > "$TARGET/DEPLOY_MARKER_$(date +%Y%m%d-%H%M%S).txt"'
+    - 'echo "Wrote marker file. Listing TARGET:"; ls -la "$TARGET"'
+
+    # Try rsync. If /bin/rsync missing on host, fall back to /usr/bin/rsync
+    - 'RSYNC_BIN=$([ -x /bin/rsync ] && echo /bin/rsync || echo /usr/bin/rsync)'
+    - 'echo "Using rsync at: $RSYNC_BIN"'
     - |
-      /bin/rsync -a --delete \
+      "$RSYNC_BIN" -av --delete \
         --exclude ".git" \
         --exclude ".github" \
         --exclude ".cpanel.yml" \
@@ -45,25 +53,5 @@ deployment:
         --exclude "media" \
         ./ "$TARGET/"
 
-    # Optional: switch .env symlink per env if present on server
-    - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
-
-    # Activate the correct cPanel virtualenv and install deps
-    - 'source "$VENV"'
-    - 'python -m pip install --upgrade pip wheel setuptools'
-    - '[ -f "$TARGET/requirements.txt" ] && pip install -r "$TARGET/requirements.txt" || true'
-
-    # Django maintenance
-    - 'cd "$TARGET"'
-    - 'python manage.py migrate --noinput'
-    - 'python manage.py collectstatic --noinput'
-    - |
-      if [ "$ENV_NAME" = "prod" ]; then
-        echo "Running production checks…"
-        python manage.py check --deploy || true
-      fi
-
-    # Restart Passenger
-    - 'mkdir -p "$TARGET/tmp"'
-    - 'touch "$TARGET/tmp/restart.txt"'
-    - 'echo "===== deploy finished: $BRANCH → $TARGET ====="'
+    - 'echo "After rsync, TARGET listing:"; ls -la "$TARGET"'
+    - 'echo "===== deploy finished ====="'
