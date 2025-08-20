@@ -3,49 +3,64 @@ deployment:
     - 'set -euo pipefail'
     - 'echo "===== cPanel deploy: $(date) ====="'
     - 'echo "PWD: $PWD"; echo "USER: $(whoami)"'
-    - 'BRANCH=$(git rev-parse --abbrev-ref HEAD || true)'; - 'echo "BRANCH=$BRANCH"'
+    - 'BRANCH=$(git rev-parse --abbrev-ref HEAD || true)'
+    - 'echo "BRANCH=$BRANCH"'
 
+    # ---- paths & python version (adjust PYVER if needed) ----
     - 'PYVER=3.10'
     - 'DEV_APP_ROOT=/home/kamranen/dev.backoffice'
     - 'PROD_APP_ROOT=/home/kamranen/backoffice'
     - 'DEV_VENV=/home/kamranen/virtualenv/dev.backoffice/$PYVER/bin/activate'
     - 'PROD_VENV=/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate'
 
+    # ---- choose target based on repo path ----
     - |
       case "$PWD" in
-        */repositories/backoffice-dev)   TARGET="$DEV_APP_ROOT"; VENV="$DEV_VENV"; ENV_NAME="dev" ;;
-        */repositories/backoffice-prod)  TARGET="$PROD_APP_ROOT"; VENV="$PROD_VENV"; ENV_NAME="prod" ;;
-        *) echo "Unknown repo path ($PWD)"; exit 1 ;;
+        */repositories/backoffice-dev)
+          TARGET="$DEV_APP_ROOT"; VENV="$DEV_VENV"; ENV_NAME="dev"
+          ;;
+        */repositories/backoffice-prod)
+          TARGET="$PROD_APP_ROOT"; VENV="$PROD_VENV"; ENV_NAME="prod"
+          ;;
+        *)
+          echo "Unknown repo path ($PWD). Expected backoffice-dev or backoffice-prod." >&2
+          exit 1
+          ;;
       esac
       echo "TARGET=$TARGET"; echo "VENV=$VENV"; echo "ENV=$ENV_NAME"
 
-    - 'mkdir -p "$TARGET"'
-    - 'RSYNC_BIN=$([ -x /bin/rsync ] && echo /bin/rsync || echo /usr/bin/rsync)'
+    # ---- prepare target; keep media/staticfiles; copy repo via tar (no rsync needed) ----
+    - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles"'
+    - 'echo "Cleaning TARGET (except media/staticfiles)..."'
+    - 'find "$TARGET" -mindepth 1 -maxdepth 1 ! -name media ! -name staticfiles -exec rm -rf {} +'
+    - 'echo "Copying repo -> TARGET via tar..."'
     - |
-      "$RSYNC_BIN" -a --delete \
-        --exclude ".git" --exclude ".github" --exclude ".cpanel.yml" \
-        --exclude "__pycache__" --exclude "node_modules" \
-        --exclude "staticfiles" --exclude "media" \
-        ./ "$TARGET/"
+      tar --exclude='.git' --exclude='.github' --exclude='.cpanel.yml' \
+          --exclude='__pycache__' --exclude='node_modules' \
+          --exclude='staticfiles' --exclude='media' \
+          -cf - . | (cd "$TARGET" && tar -xf -)
+    - 'echo "Listing TARGET:"'
+    - 'ls -la "$TARGET" | head -200'
 
-    # Optional: switch env file
+    # ---- optional: switch env file (.env.dev/.env.prod on server) ----
     - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
 
-    # Install deps
+    # ---- install dependencies into the correct cPanel venv ----
     - 'source "$VENV"'
     - 'python -m pip install --upgrade pip wheel setuptools'
     - '[ -f "$TARGET/requirements.txt" ] && pip install -r "$TARGET/requirements.txt" || true'
 
-    # Django tasks
+    # ---- Django housekeeping ----
     - 'cd "$TARGET"'
     - 'python manage.py migrate --noinput'
     - 'python manage.py collectstatic --noinput'
     - |
       if [ "$ENV_NAME" = "prod" ]; then
+        echo "Running production checks…"
         python manage.py check --deploy || true
       fi
 
-    # Restart Passenger
+    # ---- restart Passenger ----
     - 'mkdir -p "$TARGET/tmp"'
     - 'touch "$TARGET/tmp/restart.txt"'
     - 'echo "===== deploy finished ====="'
