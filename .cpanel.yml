@@ -6,11 +6,11 @@ deployment:
     - 'BRANCH=$(git rev-parse --abbrev-ref HEAD || true)'
     - 'echo "BRANCH=$BRANCH"'
 
-    # ---- paths & python version (change PYVER if needed) ----
+    # ---- paths & python version ----
     - 'PYVER=3.10'
     - 'DEV_APP_ROOT=/home/kamranen/backoffice_dev'
     - 'PROD_APP_ROOT=/home/kamranen/backoffice'
-    - 'DEV_VENV=/home/kamranen/virtualenv/dev.backoffice/$PYVER/bin/activate'
+    - 'DEV_VENV=/home/kamranen/virtualenv/backoffice_dev/$PYVER/bin/activate'
     - 'PROD_VENV=/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate'
 
     # ---- choose target based on repo path ----
@@ -29,7 +29,7 @@ deployment:
       esac
       echo "TARGET=$TARGET"; echo "VENV=$VENV"; echo "ENV=$ENV_NAME"
 
-    # ---- prepare target; KEEP important files/dirs (envs, wsgi, .htaccess, media/staticfiles/tmp) ----
+    # ---- prepare target; KEEP important files ----
     - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles" "$TARGET/tmp"'
     - 'echo "Cleaning TARGET (preserving media/staticfiles/tmp/.env*/passenger_wsgi.py/.htaccess)..."'
     - |
@@ -52,12 +52,11 @@ deployment:
           --exclude='staticfiles' --exclude='media' \
           -cf - . | (cd "$TARGET" && tar -xf -)
 
-    # ---- ensure passenger_wsgi.py exists (safety net if user removed it) ----
+    # ---- ensure passenger_wsgi.py exists ----
     - |
       if [ ! -f "$TARGET/passenger_wsgi.py" ]; then
         echo "passenger_wsgi.py missing; creating a default one..."
         cat > "$TARGET/passenger_wsgi.py" <<'PYWSGI'
-
         import os, sys, pathlib
         BASE_DIR = pathlib.Path(__file__).resolve().parent
         sys.path.insert(0, str(BASE_DIR))
@@ -67,18 +66,19 @@ deployment:
         PYWSGI
       fi
 
-    # ---- optional: switch env file (.env.dev/.env.prod on server) ----
+    # ---- switch env file (.env.dev/.env.prod) ----
     - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
 
-    # ---- install dependencies into the correct cPanel venv ----
+    # ---- install dependencies into cPanel venv ----
+    - 'echo "Installing requirements into venv..."'
     - 'source "$VENV"'
     - 'python -m pip install --upgrade pip wheel setuptools'
-    - '[ -f "$TARGET/requirements.txt" ] && pip install -r "$TARGET/requirements.txt" || true'
+    - 'if [ -f "$TARGET/requirements.txt" ]; then pip install -r "$TARGET/requirements.txt"; fi'
 
     # ---- Django housekeeping ----
     - 'cd "$TARGET"'
-    - 'python manage.py migrate --noinput'
-    - 'python manage.py collectstatic --noinput'
+    - 'python manage.py migrate --noinput || true'
+    - 'python manage.py collectstatic --noinput || true'
     - |
       if [ "$ENV_NAME" = "prod" ]; then
         echo "Running production checks…"
