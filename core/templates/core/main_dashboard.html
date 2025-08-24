@@ -1,299 +1,552 @@
 {% load static %}
+
 <!DOCTYPE html>
-<html lang="en" data-theme="">
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Dashboard - S.S Plastic</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<style>
-  /* LIGHT THEME (default) */
-  :root{
-    --brand:#0366d6;
-    --bg:#f4f6f9;
-    --card:#ffffff;
-    --text:#111827;
-    --muted:#6b7280;
-    --border:#e5e7eb;
-    --warn:#f59e0b;
-    --ok:#16a34a;
-    --danger:#dc2626;
-    --table-head:#fafafa;
-    --btn-bg:#ffffff;
-  }
-  /* DARK THEME (applies when data-theme="dark" OR prefers-color-scheme) */
-  @media (prefers-color-scheme: dark){
-    :root{
-      --bg:#0f1420; --card:#121a2a; --text:#e6edf7; --muted:#9fb0d0; --border:#1f2a44;
-      --table-head:#0b1020; --btn-bg:#0f172a;
+  <meta charset="UTF-8">
+  <title>Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    /* Apple/Tesla typography & background */
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: #f5f6f7;
+      color: #1c1c1e;
     }
+  .sidebar {
+    width: 250px;
+    background: linear-gradient(180deg, #111827 0%, #1f2937 100%);
+    color: #fff;
+    position: fixed;
+    height: 100vh;
+    padding: 1.5rem 0;
+    transition: width 0.3s ease;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 4px 0 20px rgba(0,0,0,0.2);
   }
-  html[data-theme="dark"]{
-    --bg:#0f1420; --card:#121a2a; --text:#e6edf7; --muted:#9fb0d0; --border:#1f2a44;
-    --table-head:#0b1020; --btn-bg:#0f172a;
+  .sidebar.collapsed {
+    width: 80px;
   }
 
-  body{margin:0;font-family:"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--text);}
-  header{display:flex;align-items:center;justify-content:space-between;background:var(--brand);color:#fff;padding:10px 20px;position:sticky;top:0;z-index:10}
-  header img{height:42px}
-  header nav a{color:#fff;margin-left:18px;text-decoration:none;font-weight:600;opacity:.9}
-  header nav a:hover{opacity:1;text-decoration:underline}
-  .theme-toggle{margin-left:12px;border:0;background:#ffffff22;color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer}
-  .container{max-width:1200px;margin:0 auto;padding:20px}
-  h1{margin:10px 0 8px}
-  h2{margin:18px 0 10px}
+  /* Profile block */
+  .sidebar .profile {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0 1rem 1.5rem;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  .sidebar .profile img {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid rgba(255,255,255,0.2);
+  }
+  .sidebar .profile h6 {
+    font-size: 0.9rem;
+    margin: 0;
+    font-weight: 600;
+  }
+  .sidebar .profile small {
+    font-size: 0.75rem;
+    opacity: 0.7;
+  }
 
-  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:16px 0 22px}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.05);padding:18px;text-align:center}
-  .card h2{margin:0;font-size:28px;color:var(--brand)}
-  .card p{margin:6px 0 0;color:var(--muted);font-weight:600}
+  /* Nav items */
+  .sidebar .nav-section {
+    padding: 1rem 1rem 0.5rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    opacity: 0.6;
+  }
+  .sidebar .nav-link {
+    display: flex;
+    align-items: center;
+    font-weight: 500;
+    color: #d1d5db;
+    padding: 0.75rem 1rem;
+    gap: 0.75rem;
+    border-radius: 10px;
+    margin: 0.2rem 0.75rem;
+    transition: background 0.2s, transform 0.2s;
+  }
+  .sidebar .nav-link:hover,
+  .sidebar .nav-link.active {
+    background: rgba(255,255,255,0.1);
+    color: #fff;
+    transform: translateX(4px);
+  }
+  .sidebar .nav-link i {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+  }
+  .sidebar.collapsed .nav-link span {
+    display: none;
+  }
+  .sidebar.collapsed .nav-section {
+    display: none;
+  }
 
-  .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px}
-  .panel{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.05);padding:16px}
-  .chart-wrap{position:relative;width:100%;height:360px}
-  canvas{display:block !important;width:100% !important;height:100% !important}
+  /* Bottom toggle */
+  .sidebar .bottom {
+    margin-top: auto;
+    padding: 1rem;
+  }
+    .content {
+      margin-left: 250px;
+      padding: 2rem;
+      transition: margin-left 0.3s;
+    }
+    .content.expanded { margin-left: 80px; }
 
-  table{width:100%;border-collapse:collapse}
-  th,td{padding:10px 12px;border-bottom:1px solid var(--border);text-align:left}
-  th{background:var(--table-head)}
-  tr:hover{background:rgba(3,102,214,0.05)}
-  .num{text-align:right;font-variant-numeric:tabular-nums}
-  .pill{display:inline-block;padding:2px 8px;border-radius:999px;color:#fff;font-size:12px}
-  .pill.warn{background:var(--warn)} .pill.ok{background:var(--ok)} .pill.danger{background:var(--danger)}
-  .actions a{display:inline-block;margin-left:6px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;text-decoration:none;color:var(--text);background:var(--btn-bg)}
-  .actions a:hover{border-color:var(--brand);color:var(--brand)}
+    /* === Metric Cards === */
+    .metric-card {
+      border-radius: 16px;
+      padding: 0.5rem;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      transition: transform 0.2s ease;
+    }
+    .metric-card:hover {
+      transform: translateY(-3px);
+    }
+    .metric-card h6 {
+      font-size: 0.85rem;
+      font-weight: 400;
+      opacity: 0.85;
+      margin: 0.5rem 0;
+    }
+    .metric-card h2 {
+      font-size: 2.2rem;
+      font-weight: 600;
+      margin: 0;
+    }
+    .metric-icon {
+      width: 40px;
+      height: 40px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      margin-bottom: 0.5rem;
+      background: rgba(255,255,255,0.2);
+    }
 
-  @media(max-width: 1020px){ .cards{grid-template-columns:repeat(2,1fr)} .grid{grid-template-columns:1fr} }
-  @media(max-width: 640px){ .cards{grid-template-columns:1fr} header img{height:36px} }
-</style>
+    /* Gradient themes */
+    .metric-total { background: linear-gradient(135deg,#2563eb,#1d4ed8); }
+    .metric-open { background: linear-gradient(135deg,#06b6d4,#0284c7); }
+    .metric-closed { background: linear-gradient(135deg,#16a34a,#15803d); }
+    .metric-overdue { background: linear-gradient(135deg,#dc2626,#b91c1c); }
+
+    /* Other sections */
+    .card {
+      border: none;
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+      padding: 1.25rem;
+    }
+    h6 {
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+    }
+    .chart-box {
+    position: relative;
+    height: 340px;   /* tweak: 260–420px also works well */
+    width: 100%;
+  }
+  /* Make the canvas fill the box */
+  .chart-box > canvas {
+    width: 100% !important;
+    height: 100% !important;
+    display: block !important;
+  }
+  </style>
 </head>
 <body>
-<header>
-  <div class="logo"><img src="{% static 'core/logo.png' %}" alt="S.S Plastic Logo"></div>
-  <nav>
-    <a href="/">Dashboard</a>
-    <a href="/admin/core/order/">Orders</a>
-    <a href="/admin/core/customer/">Customers</a>
-    <a href="/admin/core/payment/">Payments</a>
-    <a href="/admin/">Admin</a>
-    <button id="themeBtn" class="theme-toggle" type="button">🌙/☀️</button>
-  </nav>
-</header>
 
-<div class="container">
-  <h1>Dashboard</h1>
-
-  <!-- Summary Cards -->
-  <div class="cards">
-    <div class="card"><h2>{{ cards.open_orders }}</h2><p>Open Orders</p></div>
-    <div class="card"><h2>{{ cards.pending_payments|floatformat:2 }}</h2><p>Pending Payments (PKR)</p></div>
-    <div class="card"><h2>{{ cards.overdue_orders }}</h2><p>Overdue Orders</p></div>
-    <div class="card"><h2>{{ cards.total_material|floatformat:3 }}</h2><p>Total Material Balance (kg)</p></div>
-  </div>
-
-  <!-- Charts Row 1 -->
-  <div class="grid">
-    <div class="panel">
-      <h2>Sales per Month</h2>
-      <div class="chart-wrap"><canvas id="salesChart"></canvas></div>
-    </div>
-    <div class="panel">
-      <h2>Payment Status</h2>
-      <div class="chart-wrap" style="height:280px"><canvas id="statusChart"></canvas></div>
+<!-- Sidebar -->
+<div class="sidebar" id="sidebar">
+  <!-- Profile -->
+  <div class="profile">
+    <img src="https://i.pravatar.cc/100" alt="User">
+    <div class="info">
+      <h6>Kamran Enterprises</h6>
+      <small>Admin</small>
     </div>
   </div>
 
-  <!-- Charts Row 2 -->
-  <div class="grid" style="margin-top:16px">
-    <div class="panel">
-      <h2>Material In vs Out (Monthly)</h2>
-      <div class="chart-wrap"><canvas id="materialChart"></canvas></div>
+  <!-- Navigation -->
+  <div class="nav-section">Main</div>
+<ul class="nav flex-column">
+  <li>
+    <a href="{% url 'dashboard' %}" class="nav-link active">
+      <i data-lucide="grid"></i><span>Overview</span>
+    </a>
+  </li>
+
+  <!-- Orders (Admin model: core.Order) -->
+  <li>
+    <a href="/admin/core/order/" class="nav-link">
+      <i data-lucide="shopping-cart"></i><span>Orders</span>
+    </a>
+  </li>
+
+  <!-- Payments (Admin model: core.PaymentAllocation) -->
+  <li>
+    <a href="/admin/core/paymentallocation/" class="nav-link">
+      <i data-lucide="credit-card"></i><span>Payments</span>
+    </a>
+  </li>
+
+  <!-- Customers (Admin model: core.Customer) -->
+  <li>
+    <a href="/admin/core/customer/" class="nav-link">
+      <i data-lucide="users"></i><span>Customers</span>
+    </a>
+  </li>
+</ul>
+
+  <div class="nav-section">Management</div>
+  <ul class="nav flex-column">
+    <li><a href="/admin/core/sitesettings/" class="nav-link"><i data-lucide="bar-chart-2"></i><span>Site Settings</span></a></li>
+    <li><a href="/admin/" class="nav-link"><i data-lucide="settings"></i><span>Admin</span></a></li>
+  </ul>
+
+  <!-- Bottom -->
+  <!-- <div class="bottom">
+    <button class="btn btn-outline-light w-100" id="toggleSidebar">Toggle Menu</button>
+  </div> -->
+</div>
+
+<!-- Main Content -->
+<div class="content" id="content">
+  <div class="d-flex justify-content-between align-items-center mb-4">
+    <h2 class="fw-bold">Dashboard</h2>
+    <button class="btn btn-outline-dark" data-bs-toggle="modal" data-bs-target="#customizeModal">Customize</button>
+  </div>
+
+  <!-- Metrics -->
+  <div id="kpiRow" class="row g-3 mb-4">
+    <div class="col-md-3">
+      <div class="metric-card metric-total">
+        <div class="metric-icon"><i data-lucide="layers"></i></div>
+        <h6>Total Orders</h6>
+        <h2>{{ stats.total_orders }}</h2>
+      </div>
     </div>
-    <div class="panel">
-      <h2>Production (kg) — Weekly</h2>
-      <div class="chart-wrap" style="height:280px"><canvas id="prodWeekChart"></canvas></div>
-      <h2 style="margin-top:12px">Production (kg) — Last 14 days</h2>
-      <div class="chart-wrap" style="height:220px"><canvas id="prodDayChart"></canvas></div>
+    <div class="col-md-3">
+      <div class="metric-card metric-open">
+        <div class="metric-icon"><i data-lucide="package"></i></div>
+        <h6>Open Orders</h6>
+        <h2>{{ stats.open_orders }}</h2>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="metric-card metric-closed">
+        <div class="metric-icon"><i data-lucide="check-circle"></i></div>
+        <h6>Closed Orders</h6>
+        <h2>{{ stats.closed_orders }}</h2>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="metric-card metric-overdue">
+        <div class="metric-icon"><i data-lucide="alert-triangle"></i></div>
+        <h6>Overdue Orders</h6>
+        <h2>{{ stats.overdue_orders }}</h2>
+      </div>
     </div>
   </div>
 
-  <!-- Open Orders + Top Lists -->
-  <div class="grid" style="margin-top:16px">
-    <div class="panel">
-      <h2>Open Orders (Top 10)</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Invoice</th><th>Customer</th>
-            <th class="num">Total</th><th class="num">Outstanding</th><th>Delivery</th><th class="num">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for r in open_orders_rows %}
-          <tr>
-            <td>{{ r.invoice }}</td>
-            <td>{{ r.customer }}</td>
-            <td class="num">{{ r.total|floatformat:2 }}</td>
-            <td class="num">{{ r.outstanding|floatformat:2 }}</td>
-            <td>{{ r.delivery|date:"Y-m-d" }}</td>
-            <td class="actions num">
-              <a href="/admin/core/order/{{ r.order_id }}/change/">Open</a>
-              <a href="/admin/core/order/?id={{ r.order_id }}">Filter</a>
-            </td>
-          </tr>
-          {% empty %}
-          <tr><td colspan="6">No open orders.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
+  <!-- Charts -->
+<!-- Sales -->
+<div class="row g-3 mb-4">
+  <!-- Sales -->
+  <div class="col-md-6" id="salesSection">
+    <div class="card shadow h-100">
+      <div class="d-flex justify-content-between align-items-center px-3 pt-3 card-body--tight">
+        <h6 class="mb-0">Sales (PKR)</h6>
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-primary" onclick="setSales('daily')">Daily</button>
+          <button class="btn btn-outline-primary" onclick="setSales('monthly')">Monthly</button>
+          <button class="btn btn-outline-primary" onclick="setSales('yearly')">Yearly</button>
+        </div>
+      </div>
+      <div class="chart-box px-3 pb-3">
+        <canvas id="salesChart"></canvas>
+      </div>
     </div>
+  </div>
 
-    <div class="panel">
-      <h2>Top Outstanding Customers</h2>
-      <table>
-        <thead><tr><th>Customer</th><th class="num">Outstanding</th><th class="num">Actions</th></tr></thead>
-        <tbody>
-          {% for c in top_outstanding %}
-          <tr>
-            <td>{{ c.company_name }}</td>
-            <td class="num">{{ c.amount|floatformat:2 }}</td>
-            <td class="actions num">
-              <a href="/admin/core/order/?customer__id__exact={{ c.id }}">Orders</a>
-              <a href="/admin/core/customer/{{ c.id }}/change/">Edit</a>
-            </td>
-          </tr>
-          {% empty %}
-          <tr><td colspan="3">No dues.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-
-      <h2 style="margin-top:18px">Lowest Material Balance</h2>
-      <table>
-        <thead><tr><th>Customer</th><th class="num">Balance (kg)</th><th>Status</th><th class="num">Actions</th></tr></thead>
-        <tbody>
-          {% for c in low_stock %}
-          <tr>
-            <td>{{ c.company_name }}</td>
-            <td class="num">{{ c.balance|floatformat:3 }}</td>
-            <td>
-              {% if c.balance|floatformat:3 <= 0 %}
-                <span class="pill danger">Short</span>
-              {% elif c.balance|floatformat:3 < 25 %}
-                <span class="pill warn">Low</span>
-              {% else %}
-                <span class="pill ok">OK</span>
-              {% endif %}
-            </td>
-            <td class="actions num">
-              <a href="/admin/core/customer/{{ c.id }}/change/">Customer</a>
-            </td>
-          </tr>
-          {% empty %}
-          <tr><td colspan="4">No balances found.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
+  <!-- Production -->
+  <div class="col-md-6"  id="productionSection">
+    <div class="card shadow h-100">
+      <div class="d-flex justify-content-between align-items-center px-3 pt-3 card-body--tight">
+        <h6 class="mb-0">Production (kg)</h6>
+        <div class="btn-group btn-group-sm">
+          <button class="btn btn-outline-dark" onclick="setProd('daily')">Daily</button>
+          <button class="btn btn-outline-dark" onclick="setProd('monthly')">Monthly</button>
+          <button class="btn btn-outline-dark" onclick="setProd('yearly')">Yearly</button>
+        </div>
+      </div>
+      <div class="chart-box px-3 pb-3">
+        <canvas id="prodChart"></canvas>
+      </div>
     </div>
   </div>
 </div>
 
+  <!-- Tables -->
+  <div class="row g-3" id="tablesRow">
+    <div class="col-md-6">
+      <div class="card">
+        <h6>Top Outstanding Customers</h6>
+        <table class="table table-sm align-middle">
+          <thead><tr><th>Company</th><th>Amount</th></tr></thead>
+          <tbody>
+            {% for c in top_outstanding %}
+              <tr><td>{{ c.customer_name }}</td><td>{{ c.amount }}</td></tr>
+            {% empty %}
+              <tr><td colspan="2">No data</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card">
+        <h6>Low Stock Customers</h6>
+        <table class="table table-sm align-middle">
+          <thead><tr><th>Company</th><th>Balance (kg)</th></tr></thead>
+          <tbody>
+            {% for c in low_stock %}
+              <tr><td>{{ c.customer_name }}</td><td>{{ c.balance }}</td></tr>
+            {% empty %}
+              <tr><td colspan="2">No data</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# Production datasets #}
+{{ production_daily_labels|json_script:"production_daily_labels" }}
+{{ production_daily_values|json_script:"production_daily_values" }}
+{{ production_monthly_labels|json_script:"production_monthly_labels" }}
+{{ production_monthly_values|json_script:"production_monthly_values" }}
+{{ production_yearly_labels|json_script:"production_yearly_labels" }}
+{{ production_yearly_values|json_script:"production_yearly_values" }}
+{# Sales datasets #}
+{{ sales_daily_labels|json_script:"sales-daily-labels" }}
+{{ sales_daily_values|json_script:"sales-daily-values" }}
+{{ sales_monthly_labels|json_script:"sales-monthly-labels" }}
+{{ sales_monthly_values|json_script:"sales-monthly-values" }}
+{{ sales_yearly_labels|json_script:"sales-yearly-labels" }}
+{{ sales_yearly_values|json_script:"sales-yearly-values" }}
+
+<!-- Customize Modal -->
+<div class="modal fade" id="customizeModal" tabindex="-1" aria-labelledby="customizeModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="customizeModalLabel">Customize Dashboard</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+
+      <div class="modal-body">
+        <p class="text-muted mb-3">Choose which widgets to show on the dashboard.</p>
+
+        <div class="list-group">
+          <label class="list-group-item d-flex align-items-center gap-3">
+            <input class="form-check-input me-1" type="checkbox" id="opt-kpis" checked>
+            <i data-lucide="panels-top"></i> <span>Summary Cards (KPIs)</span>
+          </label>
+
+          <label class="list-group-item d-flex align-items-center gap-3">
+            <input class="form-check-input me-1" type="checkbox" id="opt-sales" checked>
+            <i data-lucide="line-chart"></i> <span>Sales Chart</span>
+          </label>
+
+          <label class="list-group-item d-flex align-items-center gap-3">
+            <input class="form-check-input me-1" type="checkbox" id="opt-production" checked>
+            <i data-lucide="factory"></i> <span>Production Chart</span>
+          </label>
+
+          <label class="list-group-item d-flex align-items-center gap-3">
+            <input class="form-check-input me-1" type="checkbox" id="opt-tables" checked>
+            <i data-lucide="table"></i> <span>Tables (Outstanding / Low Stock)</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+        <button id="saveCustomize" class="btn btn-primary">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
 <script>
-  // --- Theme toggle (persists in localStorage) ---
-  const btn = document.getElementById('themeBtn');
-  const root = document.documentElement;
-  const KEY = 'ssplastic-theme';
-  const saved = localStorage.getItem(KEY);
-  if (saved) root.setAttribute('data-theme', saved);
-  btn.addEventListener('click', () => {
-    const cur = root.getAttribute('data-theme') === 'dark' ? '' : 'dark';
-    if (cur) root.setAttribute('data-theme', cur); else root.removeAttribute('data-theme');
-    localStorage.setItem(KEY, cur);
-    // Redraw charts for better contrast
-    for (const c of window.__charts || []) c.update();
+  if (window.lucide) lucide.createIcons();
+
+  // Keys used in localStorage
+  const PREFS_KEY = 'dashboard_prefs';
+
+  // Map options to DOM sections
+  const SECTION_MAP = {
+    'opt-kpis':       'kpiRow',
+    'opt-sales':      'salesSection',
+    'opt-production': 'productionSection',
+    'opt-tables':     'tablesRow',
+  };
+
+  // Read prefs (or defaults if none)
+  function loadPrefs() {
+    try {
+      return JSON.parse(localStorage.getItem(PREFS_KEY)) || {
+        'opt-kpis': true,
+        'opt-sales': true,
+        'opt-production': true,
+        'opt-tables': true,
+      };
+    } catch {
+      return { 'opt-kpis': true, 'opt-sales': true, 'opt-production': true, 'opt-tables': true };
+    }
+  }
+
+  // Apply visibility to sections
+  function applyPrefs(prefs) {
+    Object.entries(SECTION_MAP).forEach(([optId, sectionId]) => {
+      const el = document.getElementById(sectionId);
+      if (!el) return;
+      el.classList.toggle('d-none', !prefs[optId]);
+    });
+  }
+
+  // Sync checkboxes in modal with prefs
+  function populateModal(prefs) {
+    Object.keys(SECTION_MAP).forEach(optId => {
+      const cb = document.getElementById(optId);
+      if (cb) cb.checked = !!prefs[optId];
+    });
+  }
+
+  // Save button
+  document.getElementById('saveCustomize')?.addEventListener('click', () => {
+    const prefs = {};
+    Object.keys(SECTION_MAP).forEach(optId => {
+      const cb = document.getElementById(optId);
+      prefs[optId] = cb ? cb.checked : true;
+    });
+     // apply immediately
+    Object.entries(SECTION_MAP).forEach(([optId, sectionId]) => {
+      const el = document.getElementById(sectionId);
+      if (el) el.classList.toggle('d-none', !prefs[optId]);
+    });
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    applyPrefs(prefs);
+    // hide modal cleanly
+    const modalEl = document.getElementById('customizeModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.hide();
   });
 
-  // Utility to read CSS variable for chart colors
-  function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-  function chartTextColor(){ return cssVar('--text') || '#111827'; }
-  function gridColor(){ return cssVar('--border') || '#e5e7eb'; }
+    // After the modal is fully hidden, force-clean any stray backdrop/classes
+  document.getElementById('customizeModal')?.addEventListener('hidden.bs.modal', () => {
+    // remove any leftover backdrops just in case
+    document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+    // remove the modal-open body class and inline padding
+    document.body.classList.remove('modal-open');
+    document.body.style.removeProperty('padding-right');
+  });
 
-  // Data from context
-  const salesLabels = {{ sales_labels|safe }};
-  const salesValues = {{ sales_values|safe }};
-  const statusCounts = {{ status_counts|safe }};
-  const materialMonthLabels = {{ material_month_labels|safe }};
-  const materialInValues = {{ material_in_values|safe }};
-  const materialOutValues = {{ material_out_values|safe }};
-  const prodWeekLabels = {{ production_week_labels|safe }};
-  const prodWeekValues = {{ production_week_values|safe }};
-  const prodDayLabels = {{ production_day_labels|safe }};
-  const prodDayValues = {{ production_day_values|safe }};
-
-  window.__charts = [];
-
-  // Sales per Month
-  window.__charts.push(new Chart(document.getElementById('salesChart').getContext('2d'), {
-    type: 'bar',
-    data: { labels: salesLabels, datasets: [{ label: 'Sales (PKR)', data: salesValues, borderWidth: 1 }] },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
-               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
-      plugins: { legend: { display: true, position: 'top', labels:{ color: chartTextColor() } } }
-    }
-  }));
-
-  // Payment Status
-  window.__charts.push(new Chart(document.getElementById('statusChart').getContext('2d'), {
-    type: 'doughnut',
-    data: { labels: ['Paid','Partial','Pending'], datasets: [{ data: [statusCounts.paid, statusCounts.partial, statusCounts.pending] }] },
-    options: { responsive: true, maintainAspectRatio: false, cutout: '55%',
-      plugins: { legend: { position: 'bottom', labels:{ color: chartTextColor() } } }
-    }
-  }));
-
-  // Material In vs Out (Monthly)
-  window.__charts.push(new Chart(document.getElementById('materialChart').getContext('2d'), {
-    type: 'bar',
-    data: {
-      labels: materialMonthLabels,
-      datasets: [
-        { label: 'IN (kg)',  data: materialInValues,  borderWidth: 1 },
-        { label: 'OUT (kg)', data: materialOutValues, borderWidth: 1 }
-      ]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
-               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
-      plugins: { legend: { position: 'top', labels:{ color: chartTextColor() } } }
-    }
-  }));
-
-  // Production Weekly
-  window.__charts.push(new Chart(document.getElementById('prodWeekChart').getContext('2d'), {
-    type: 'line',
-    data: { labels: prodWeekLabels, datasets: [{ label: 'kg per week', data: prodWeekValues, borderWidth: 2, tension: .25, fill: false }] },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
-               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
-      plugins: { legend: { position: 'top', labels:{ color: chartTextColor() } } }
-    }
-  }));
-
-  // Production Daily (last 14 days)
-  window.__charts.push(new Chart(document.getElementById('prodDayChart').getContext('2d'), {
-    type: 'line',
-    data: { labels: prodDayLabels, datasets: [{ label: 'kg per day', data: prodDayValues, borderWidth: 2, tension: .25, fill: false }] },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      scales: { y: { beginAtZero: true, grid: { color: gridColor() }, ticks: { color: chartTextColor() } },
-               x: { grid: { color: gridColor() }, ticks: { color: chartTextColor() } } },
-      plugins: { legend: { position: 'top', labels:{ color: chartTextColor() } } }
-    }
-  }));
 </script>
+<script>
+  // Load datasets from JSON-script tags
+  const S = {
+    daily: {
+      labels: JSON.parse(document.getElementById('sales-daily-labels').textContent || '[]'),
+      values: JSON.parse(document.getElementById('sales-daily-values').textContent || '[]'),
+    },
+    monthly: {
+      labels: JSON.parse(document.getElementById('sales-monthly-labels').textContent || '[]'),
+      values: JSON.parse(document.getElementById('sales-monthly-values').textContent || '[]'),
+    },
+    yearly: {
+      labels: JSON.parse(document.getElementById('sales-yearly-labels').textContent || '[]'),
+      values: JSON.parse(document.getElementById('sales-yearly-values').textContent || '[]'),
+    }
+  };
+
+  const P = {
+    daily: {
+      labels: JSON.parse(document.getElementById('production_daily_labels').textContent || '[]'),
+      values: JSON.parse(document.getElementById('production_daily_values').textContent || '[]'),
+    },
+    monthly: {
+      labels: JSON.parse(document.getElementById('production_monthly_labels').textContent || '[]'),
+      values: JSON.parse(document.getElementById('production_monthly_values').textContent || '[]'),
+    },
+    yearly: {
+      labels: JSON.parse(document.getElementById('production_yearly_labels').textContent || '[]'),
+      values: JSON.parse(document.getElementById('production_yearly_values').textContent || '[]'),
+    }
+  };
+
+  // Init charts (default to daily)
+  const salesCtx = document.getElementById('salesChart').getContext('2d');
+  const prodCtx  = document.getElementById('prodChart').getContext('2d');
+
+  const salesChart = new Chart(salesCtx, {
+    type: 'line',
+    data: { labels: S.daily.labels, datasets: [{ label: 'Sales (PKR)', data: S.daily.values, borderColor: '#0d6efd', tension: 0.35, fill: false }] },
+    options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
+  });
+
+  const prodChart = new Chart(prodCtx, {
+    type: 'bar',
+    data: { labels: P.daily.labels, datasets: [{ label: 'Production (kg)', data: P.daily.values, backgroundColor: '#0d6efd' }] },
+    options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } }
+  });
+
+  // Toggle handlers
+  function setSales(which) {
+    salesChart.data.labels = S[which].labels;
+    salesChart.data.datasets[0].data = S[which].values;
+    salesChart.update();
+  }
+  function setProd(which) {
+    prodChart.data.labels = P[which].labels;
+    prodChart.data.datasets[0].data = P[which].values;
+    prodChart.update();
+  }
+  //   // Quick visibility check in the console (helps diagnose empty arrays)
+  // console.log('Production daily points:', (P.daily.values || []).length);
+  // console.log('Production monthly points:', (P.monthly.values || []).length);
+  // console.log('Production yearly points:', (P.yearly.values || []).length);
+
+  // console.log('Sales daily points:', (S.daily.values || []).length);
+  // console.log('Sales monthly points:', (S.monthly.values || []).length);
+  // console.log('Sales yearly points:', (S.yearly.values || []).length);
+</script>
+
 </body>
 </html>
