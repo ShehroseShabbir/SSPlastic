@@ -96,7 +96,7 @@ class RawMaterialTxn(models.Model):
         """
         obj, _ = Customer.objects.get_or_create(
             company_name="__COMPANY_STOCK__",
-            defaults={"country": "Pakistan"},
+            defaults={"country": "PK"},
         )
         return obj
 
