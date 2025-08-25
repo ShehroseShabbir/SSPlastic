@@ -25,7 +25,7 @@ class Payment(models.Model):
     customer = models.ForeignKey("Customer", on_delete=models.CASCADE, related_name="payments_ar")
     received_on = models.DateField(default=timezone.now)
     method = models.CharField(max_length=20, choices=PAYMENT_METHODS, default="TRANSFER")
-    bank = models.CharField(choices=BANK_NAMES, blank=True)
+    bank = models.CharField(choices=BANK_NAMES, blank=True, max_length=50)
     reference = models.CharField(max_length=64, blank=True)  # cheque no., bank ref, etc.
     amount = models.DecimalField(max_digits=12, decimal_places=2)  # positive for receipt; negative for refund
     notes = models.TextField(blank=True)
