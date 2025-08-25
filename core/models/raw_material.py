@@ -91,13 +91,14 @@ class RawMaterialTxn(models.Model):
     # ---- Company Stock bucket ---------------------------------------------
     @staticmethod
     def company_stock_customer():
-        """
-        Returns (or creates) the special Customer to hold company inventory.
-        """
         obj, _ = Customer.objects.get_or_create(
             company_name="__COMPANY_STOCK__",
-            defaults={"country": "PK"},
+            defaults={"country": "PK"},  # <-- was "Pakistan"
         )
+        # if an old bad row exists, normalize it
+        if len(str(obj.country)) > 2:
+            obj.country = "PK"
+            obj.save(update_fields=["country"])
         return obj
 
     # ---- Validation & normalization ---------------------------------------
