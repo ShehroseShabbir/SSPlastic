@@ -1,7 +1,8 @@
 # core/admin.py
 from django.core.cache import cache
 from django.contrib import admin
-from .models import SiteSettings  # keep your other imports
+
+from core.models.settings import SiteSettings
 
 def _splitlines(val):
     if not val:

@@ -19,7 +19,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Folder to store generated invoices
 INVOICES_ROOT = BASE_DIR / "invoices"
 INVOICES_ROOT.mkdir(parents=True, exist_ok=True)  # auto-create on startup
-
+INVOICE_ROUNDING = {
+    "mode": "ceil",       # ceil | half_up | floor (ceil = always round up)
+    "quantum": "1",       # '1' rupee, or '10' to round up to next 10, etc.
+}
 # Path to logo (put the file in your project; e.g. core/static/core/Logo.png)
 INVOICE_LOGO_PATH = BASE_DIR / "core" / "static" / "core" / "Logo.png"
 
@@ -69,6 +72,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    "django.contrib.humanize",
+    'django_countries',
     'rest_framework',
     'core.apps.CoreConfig',
 ]

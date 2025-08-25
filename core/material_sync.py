@@ -5,7 +5,7 @@ from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from .models import OrderItem  # or adjust import path
 from .models import CustomerMaterialLedger, Order, MaterialReceipt
-from .utils import dkg  # your Decimal quantizer
+from .utils_weight import dkg  # your Decimal quantizer
 
 CONSUME_STATUSES = ("CONFIRMED", "INPROD", "READY", "DELIVERED", "SHIPPED", "CLOSED")
 
