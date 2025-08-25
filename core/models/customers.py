@@ -15,7 +15,7 @@ from ..models_ar import FINAL_STATES
 class Customer(models.Model):
     company_name = models.CharField(max_length=255)
     contact_name = models.CharField(max_length=255, blank=True)
-    country = CountryField(blank=True, null=True)  # or CountryField if using django-countries
+    country = models.CharField(max_length=50, blank=True)
     phone = models.CharField(max_length=20, blank=True)
     email = models.EmailField(blank=True)
     address = models.TextField(blank=True)
