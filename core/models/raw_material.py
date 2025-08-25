@@ -9,7 +9,6 @@ from core.models.materials import CustomerMaterialLedger  # adjust import path i
 from core.utils_weight import dkg  # returns Decimal with 3dp
 
 BAG_WEIGHT_KG = Decimal("25.000")
-DEFAULT_COUNTRY_CODE = getattr(settings, "DEFAULT_COUNTRY_CODE", "PK")
 
 
 class RawMaterialTxn(models.Model):
@@ -94,7 +93,7 @@ class RawMaterialTxn(models.Model):
     def company_stock_customer():
         obj, _ = Customer.objects.get_or_create(
             company_name="__COMPANY_STOCK__",
-            defaults={"country": DEFAULT_COUNTRY_CODE},  # <-- was "Pakistan"
+            defaults={"country": "Pakistan"},  # <-- was "Pakistan"
         )
         # if an old bad row exists, normalize it
         if len(str(obj.country)) > 2:
