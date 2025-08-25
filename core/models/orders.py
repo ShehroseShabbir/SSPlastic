@@ -67,7 +67,7 @@ class Order(models.Model):
 
     customer = models.ForeignKey("Customer", on_delete=models.CASCADE, related_name="orders")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default="DRAFT")
-    order_date = models.DateField()
+    order_date = models.DateField(auto_now_add=True)
     delivery_date = models.DateField(blank=True, null=True)
     payment_terms = models.CharField(max_length=20, choices=PAYMENT_TERMS, blank=True)
 
