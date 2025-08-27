@@ -1139,18 +1139,19 @@ class SalaryPaymentAdmin(admin.ModelAdmin):
     list_filter = ('period_year', 'period_month', 'method', 'employee')
     search_fields = ('employee__name',)
     date_hierarchy = 'payment_date'
-
-from .models import SiteSettings  # keep your other imports
-
-
+    
 class SiteSettingsAdmin(admin.ModelAdmin):
     fieldsets = (
         ("Branding", {"fields": ("company_name", "company_address", "logo")}),
         ("Tax", {"fields": ("tax_label", "tax_rate")}),
-        ("Banking", {"fields": ("bank_details",)}),
+        ("Banking", {"fields": ("notes","bank_details")}),
         ("Email (optional)", {"fields": ("email_host", "email_port", "email_use_tls", "email_host_user", "email_host_password"), "classes": ("collapse",)}),
     )
     list_display = ("company_name", "tax_label", "tax_rate")
-
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        # DEBUG: see fields the form thinks it has
+        print("SiteSettingsAdmin fields ->", list(form.base_fields.keys()))
+        return form
 
 

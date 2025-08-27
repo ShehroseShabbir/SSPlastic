@@ -6,6 +6,7 @@ class SiteSettings(models.Model):
     company_name = models.CharField(max_length=255, blank=True, default="")
     company_address = models.TextField(blank=True, default="")  # multi-line
     bank_details = models.TextField(blank=True, default="")     # multi-line
+    notes = models.TextField(blank=True, default="")     # multi-line
     logo = models.ImageField(upload_to="branding/", null=True, blank=True)
 
     # Tax

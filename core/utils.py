@@ -38,7 +38,21 @@ def pkr_str(val) -> str:
     return f"Rs. {to_rupees_int(D(val)):,}"
 
 # ---- Customer Billing Monthly ----------
+# Apply table style
+style = TableStyle([
+    ("GRID", (0, 0), (-1, -2), 0.5, colors.black),
 
+    # Header row
+    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+
+    # Total row (last row)
+    ("BACKGROUND", (0, -1), (-1, -1), colors.black),
+    ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+    ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+
+    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+])
 # ----------------------------
 # Small drawing helpers
 # ----------------------------
@@ -316,11 +330,20 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     c.setFont("Helvetica-Bold", 16)
     # c.drawCentredString(W/2, title_y, "Customer Monthly Statement")
 
-    meta_y = title_y - 26
-    c.setFont("Helvetica-Bold", 16)
-    c.drawCentredString(W/2, title_y, f"{customer.company_name} Monthly Statement")
-    c.setFont("Helvetica", 11)
-    c.drawCentredString(W/2, meta_y, f"Period: {month:02d}-{year:04d}")
+    # Title positions
+    c.setFont("Helvetica-Bold", 20)
+    c.drawCentredString(W/2, title_y, f"{customer.company_name}")
+
+    # Move down for "Monthly Statement"
+    # Format month name instead of "08"
+    import calendar
+    month_name = calendar.month_name[month]  # e.g. "August"
+    meta_y = title_y - 22
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(W/2, meta_y, f"{month_name} {year} Statement")
+
+
+    # Set y for further content
     y = meta_y - 24
 
     # --- Table 1: Invoices (All) ---
@@ -338,13 +361,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     orders_col_widths = [w * scale for w in orders_base_cols]
 
     t1 = Table(orders_table_data, colWidths=orders_col_widths, repeatRows=1)
-    t1.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -2), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.lightgrey),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-    ]))
+    t1.setStyle(style)
 
     tw, th = t1.wrapOn(c, W, H)
     x_center = (W - tw) / 2.0
@@ -379,13 +396,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     pay_col_widths = [w * scale for w in pay_base_cols]
 
     t2 = Table(payments_table, colWidths=pay_col_widths, repeatRows=1)
-    t2.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -2), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.lightgrey),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-    ]))
+    t2.setStyle(style)
     
 
     tw, th = t2.wrapOn(c, W, H)
@@ -432,13 +443,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     rec_col_widths = [w * scale for w in rec_base_cols]
 
     t3 = Table(receipts_table, colWidths=rec_col_widths, repeatRows=1)
-    t3.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -2), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.lightgrey),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-    ]))
+    t3.setStyle(style)
 
     tw, th = t3.wrapOn(c, W, H)
     x_center = (W - tw) / 2.0
@@ -462,12 +467,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     mat_col_widths = [w * scale for w in mat_base_cols]
 
     t3 = Table(rows_mat_balance, colWidths=mat_col_widths, repeatRows=0)
-    t3.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-    ]))
+    t3.setStyle(style)
 
     tw, th = t3.wrapOn(c, W, H)
     x_center = (W - tw) / 2.0
