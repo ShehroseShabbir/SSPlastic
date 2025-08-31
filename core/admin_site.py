@@ -34,8 +34,8 @@ class SSPAdminSite(AdminSite):
         buckets = [
             ("Accounting", [
                 pick("Receive Payments"),
+                pick("Allocate Payments"),
                 pick("Material Receipts"),
-                pick("Payments Ledger"),
                 pick("Ledgers"),
                 pick("Raw Material Transactions"),
                 pick("Expenses"),

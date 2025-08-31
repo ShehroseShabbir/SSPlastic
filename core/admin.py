@@ -1,11 +1,11 @@
 from django.contrib import admin, messages
-from django.urls import path, reverse,NoReverseMatch
+from django.urls import path, reverse
 from django import forms
 from django.core.exceptions import ValidationError
 from django.http import FileResponse, HttpResponseRedirect, HttpResponseBadRequest
 from django.utils.html import format_html
 from django.shortcuts import redirect, get_object_or_404, render
-from django.db.models import Sum, F, Value, ExpressionWrapper, DecimalField, Q,F, IntegerField
+from django.db.models import Sum, F, Value, ExpressionWrapper, DecimalField, Q,F
 from django.db.models.functions import Coalesce
 from django.utils.timezone import now
 from django.template.response import TemplateResponse
@@ -15,27 +15,22 @@ from calendar import month_name
 from django.db import transaction
 from core.admin_forms.raw_material import PurchaseForm, SellForm, TransferForm
 from core.models.common import money_int_pk
-from core.models.raw_material import BAG_WEIGHT_KG, RawMaterialPurchasePayment
+from core.models.raw_material import RawMaterialPurchasePayment
 
 # ✅ remove the bad absolute import; use relative imports only
-from core.services.material_sync import sync_order_material_ledger
+from .material_sync import sync_order_material_ledger
 from core.models import (
     Customer, Order, OrderItem, OrderRoll,
     MaterialReceipt, CustomerMaterialLedger,
     ExpenseCategory, Expense, SalaryPayment,
-    Employee, Attendance
+    Employee, Attendance,RawMaterialTxn
 )
-from core.models.raw_material import RawMaterialTxn, SupplierPayment, RawMaterialPurchasePayment
-from core.services.signals_billing import propagate_carry_forward
-from core.utils_money import to_rupees_int
-from core.utils_weight import D, dkg
-
 # ✅ Payment/Allocation live in models_ar, import them from there (not from .models)
-from .models_ar import FINAL_STATES, Payment, PaymentAllocation
+from .models_ar import Payment, PaymentAllocation
+from .ar_utils import auto_apply_fifo
 from .utils import generate_invoice, send_invoice_email, generate_customer_monthly_statement
 
-from django.db.models import Sum
-from django.utils.safestring import mark_safe
+
 
 KG = DecimalField(max_digits=12, decimal_places=3)
 MONEY = DecimalField(max_digits=18, decimal_places=2)
@@ -151,8 +146,7 @@ class PaymentAllocationInline(admin.TabularInline):
         # uses Payment.unapplied_amount property
         return f"{obj.payment.unapplied_amount:,.2f}"
     payment_unapplied_now.short_description = "Payment Unapplied (now)"
-    def has_add_permission(self, request, obj=None):
-        return False
+
 # in core/admin.py
 
 @admin.register(PaymentAllocation)
@@ -186,7 +180,6 @@ class PaymentAdmin(admin.ModelAdmin):
     list_filter = ("method", "received_on", "customer")
     search_fields = ("reference", "customer__company_name")
     inlines = [PaymentAllocationInline]
-    readonly_fields = ()
     actions = ["auto_apply_selected"]
     ordering = ("-received_on", "-id")
     list_per_page = 50
@@ -256,43 +249,29 @@ class CustomerPaymentInline(admin.TabularInline):
     fields = ('received_on', 'amount', 'method', 'reference', 'notes')
     ordering = ('-received_on',)
 
-# ---------- Admin ----------
 @admin.register(Customer)
 class CustomerAdmin(admin.ModelAdmin):
     change_form_template = "core/admin/core/customer/change_form.html"
-
     list_display = (
         "company_name",
         "contact_name",
-        "material_balance_display",
-        "carry_forward_display",
-        "pending_display",
         "lifetime_in_display",
+        "total_material_display",
+        "carry_forward_display",
+        "total_due_with_carry_display",
     )
     readonly_fields = (
-        "material_balance_display",
-        "pending_display",
         "lifetime_in_display",
+        "total_material_display",
+        "total_due_with_carry_display",
     )
     fieldsets = (
-        ("Personal Details", {"fields": ("company_name", "contact_name")}),
-        ("Company Details", {"fields": ("country", "phone", "email", "address")}),
-        (
-            "Customer Account Stats",
-            {
-                "fields": (
-                    "previous_pending_balance_pkr",
-                    "material_balance_display",
-                    "lifetime_in_display",
-                    "pending_display",
-                )
-            },
-        ),
+         ("Personal Details", {"fields": ("company_name", "contact_name")}),
+         ("Company Details", {"fields": ("country", "phone", "email", "address")}),
+         ("Customer Account Stats", {"fields": ("previous_pending_balance_pkr", "lifetime_in_display", "total_material_display", "total_due_with_carry_display")}),
     )
     search_fields = ("company_name", "contact_name", "phone", "email")
     ordering = ("company_name",)
-
-    # ----- URLs: preview/download statement -----
     def get_urls(self):
         urls = super().get_urls()
         my_urls = [
@@ -306,49 +285,30 @@ class CustomerAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.preview_statement),
                 name="core_customer_preview_statement",
             ),
+            path("<int:pk>/purchase-material/", self.admin_site.admin_view(self.purchase_material),
+                 name="core_customer_purchase_material"),
+            path("<int:pk>/sell-material/", self.admin_site.admin_view(self.sell_material),
+                 name="core_customer_sell_material"),
+            path("<int:pk>/transfer-material/", self.admin_site.admin_view(self.transfer_material),
+                 name="core_customer_transfer_material"),
         ]
         return my_urls + urls
-
-    # ----- Displays (read-only) -----
-    @admin.display(description="Material Balance (kg)")
-    def material_balance_display(self, obj):
-        # Net IN − OUT (3dp)
-        agg = obj.material_ledger.aggregate(
-            s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
-        )
-        bal = agg["s"] or Decimal("0.000")
-        return f"{bal:,.3f}"
-
+    # Pretty labels
     @admin.display(description="Total IN (Lifetime kg)")
     def lifetime_in_display(self, obj):
-        agg = obj.material_ledger.filter(delta_kg__gt=0).aggregate(
-            s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
-        )
-        val = agg["s"] or Decimal("0.000")
-        return f"{val:,.3f}"
+        return f"{obj.total_material_lifetime_kg:,.3f}"
     
+    @admin.display(description="Total Material (kg)")
+    def total_material_display(self, obj):
+        return f"{obj.total_material_kg:,.3f}"
+
     @admin.display(description="Carry-Forward (PKR)")
     def carry_forward_display(self, obj):
-        # Shows 0 once payments ≥ initial carry
-        return money_int_pk(obj.carry_remaining_pkr)
+        return f"PKR {obj.previous_pending_balance_pkr:,}"
 
-    @admin.display(description="Pending / Credit (PKR)")
-    def pending_display(self, obj):
-        # prefer stored field; fallback to live compute
-        val = getattr(obj, "pending_balance_pkr", None)
-        if val is None:
-            val = obj.pending_balance_live_pkr
-        try:
-            n = int(val or 0)
-        except (TypeError, ValueError):
-            n = 0
-
-        if n >= 0:
-            return f"PKR {n:,}"
-        # overpaid → show positive with credit label
-        return f"PKR {abs(n):,} (credit)"
-
-    # ----- Statement preview/download helpers -----
+    @admin.display(description="Pending + Carry (PKR)")
+    def total_due_with_carry_display(self, obj):
+        return f"PKR {obj.ar_total_due_with_carry_pkr:,}"
     def _parse_period(self, request):
         """Get (year, month) from GET with safe defaults and validation."""
         today = now().date()
@@ -360,17 +320,13 @@ class CustomerAdmin(admin.ModelAdmin):
         if not (2000 <= year <= 2100) or not (1 <= month <= 12):
             return None, None
         return year, month
-
+    
+    
+    
     def download_statement(self, request, pk):
         year, month = self._parse_period(request)
         if year is None:
             return HttpResponseBadRequest("Invalid year/month.")
-
-        # Lazy import to avoid circulars; adjust to your actual module path
-        try:
-            from core.utils import generate_customer_monthly_statement
-        except Exception:
-            from core.utils import generate_customer_monthly_statement  # fallback if you use a different path
 
         try:
             pdf_path = generate_customer_monthly_statement(pk, year, month, user=request.user)
@@ -378,19 +334,17 @@ class CustomerAdmin(admin.ModelAdmin):
             return HttpResponseBadRequest(str(e))
 
         fname = Path(pdf_path).name
-        return FileResponse(
-            open(pdf_path, "rb"), as_attachment=True, filename=fname, content_type="application/pdf"
-        )
-
+        # attachment = True forces download (keeps filename)
+        return FileResponse(open(pdf_path, "rb"),
+                           as_attachment=True,
+                           filename=fname,
+                           content_type="application/pdf")
+    
+    
     def preview_statement(self, request, pk):
         year, month = self._parse_period(request)
         if year is None:
             return HttpResponseBadRequest("Invalid year/month.")
-
-        try:
-            from core.utils import generate_customer_monthly_statement
-        except Exception:
-            from core.utils import generate_customer_monthly_statement
 
         try:
             pdf_path = generate_customer_monthly_statement(pk, year, month, user=request.user)
@@ -399,45 +353,290 @@ class CustomerAdmin(admin.ModelAdmin):
 
         fname = Path(pdf_path).name
         resp = FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
+        # inline + filename ⇒ shows in browser tab with correct name
         resp["Content-Disposition"] = f'inline; filename="{fname}"'
         return resp
 
-    # ----- Change form extras (month/year dropdown + quick ledger links) -----
     def change_view(self, request, object_id, form_url="", extra_context=None):
         extra_context = extra_context or {}
 
+        # ----- Month/Year dropdown context -----
         today = now().date()
         months = [(i, month_name[i]) for i in range(1, 13)]
         years = list(range(today.year - 5, today.year + 2))
 
         default_month = int(request.GET.get("month", today.month))
-        default_year = int(request.GET.get("year", today.year))
+        default_year  = int(request.GET.get("year",  today.year))
 
         download_url = reverse("admin:core_customer_download_statement", args=[object_id])
-        preview_url = reverse("admin:core_customer_preview_statement", args=[object_id])
-
-        cash_ledger_url = reverse("admin:core_payment_changelist") + f"?customer__id__exact={object_id}"
+        preview_url  = reverse("admin:core_customer_preview_statement", args=[object_id])
+        # Build filtered changelist links
+        cash_ledger_url = (
+            reverse("admin:core_payment_changelist")
+            + f"?customer__id__exact={object_id}"
+        )
         material_ledger_url = (
-            reverse("admin:core_customermaterialledger_changelist") + f"?customer__id__exact={object_id}"
+            reverse("admin:core_customermaterialledger_changelist")
+            + f"?customer__id__exact={object_id}"
         )
         allocation_ledger_url = (
-            reverse("admin:core_paymentallocation_changelist") + f"?order__customer__id__exact={object_id}"
+            reverse("admin:core_paymentallocation_changelist")
+            + f"?order__customer__id__exact={object_id}"
+        )
+                
+    
+        extra_context.update({
+        # statement widget
+        "statement_download_url": download_url,
+        "statement_preview_url": preview_url,
+        "months": months,
+        "years": years,
+        "default_month": default_month,
+        "default_year": default_year,
+        # ledgers
+        "cash_ledger_url": cash_ledger_url,
+        "material_ledger_url": material_ledger_url,
+        "allocation_ledger_url": allocation_ledger_url,
+    })
+        if request.user.is_superuser or request.user.has_perm("core.can_manage_material_trades"):
+            extra_context["raw_material_tools"] = True
+        return super().change_view(request, object_id, form_url, extra_context=extra_context)
+    # ---- Views
+    def _check_perm_or_403(self, request):
+        if not (request.user.is_superuser or request.user.has_perm("core.can_manage_material_trades")):
+            messages.error(request, "You do not have permission to manage raw material trades.")
+            return redirect("admin:index")
+     # --- Purchase Material   
+    def _raw_material_base_ctx(self, request, customer, title):
+        return {
+            **self.admin_site.each_context(request),
+            "opts": self.model._meta,
+            "app_label": self.model._meta.app_label,   # ✅ keep breadcrumbs working
+            "original": customer,                      # used by default admin header
+            "title": title,
+            "media": self.media,
+            "has_view_permission": True,
+        }
+        
+    def purchase_material(self, request, pk):
+        self._check_perm_or_403(request)
+        customer = Customer.objects.get(pk=pk)  # this 'customer' is just context
+        ctx = self._raw_material_base_ctx(request, customer, f"Purchase Raw Material — {customer}")
+
+        if request.method == "POST":
+            supplier = (request.POST.get("supplier") or "").strip()
+            qty_raw = (request.POST.get("qty_kg") or "").strip()
+            rate_raw = (request.POST.get("unit_cost_pkr") or "").strip()
+            notes = (request.POST.get("notes") or "").strip()
+
+            errors = []
+            if not supplier:
+                errors.append("Supplier is required.")
+
+            try:
+                qty_kg = Decimal(qty_raw)
+                if qty_kg <= 0:
+                    raise ValueError()
+            except Exception:
+                errors.append("Quantity (kg) must be a positive number.")
+
+            try:
+                rate_pkr = int(rate_raw)
+                if rate_pkr < 0:
+                    raise ValueError()
+            except Exception:
+                errors.append("Unit cost (PKR/kg) must be a whole number ≥ 0.")
+
+            if errors:
+                for e in errors:
+                    messages.error(request, e)
+                return TemplateResponse(request, "core/admin/raw_material/purchase.html", ctx)
+
+            # Create & apply
+            try:
+                with transaction.atomic():
+                    txn = RawMaterialTxn(
+                    kind=RawMaterialTxn.Kind.PURCHASE,
+                    supplier_name=supplier,
+                    qty_kg=qty_kg,
+                    rate_pkr=rate_pkr,
+                    memo=notes,
+                )
+                txn.apply(user=request.user)
+                messages.success(request, f"Purchase recorded. Txn #{txn.pk}.")
+            except Exception as e:
+                messages.error(request, f"Could not record purchase: {e}")
+                return TemplateResponse(request, "core/admin/raw_material/purchase.html", ctx)
+
+            return redirect(reverse("admin:core_customer_change", args=[pk]))
+
+        return TemplateResponse(request, "core/admin/raw_material/purchase.html", ctx)
+
+    # ---------- SELL (Company Stock OUT → Customer IN) ----------
+    def sell_material(self, request, pk):
+        self._check_perm_or_403(request)
+        # here, 'customer' is the buyer (to_customer)
+        customer = Customer.objects.get(pk=pk)
+        ctx = self._raw_material_base_ctx(request, customer, f"Sell Raw Material — {customer}")
+
+        if request.method == "POST":
+            qty_raw = (request.POST.get("qty_kg") or "").strip()
+            rate_raw = (request.POST.get("unit_cost_pkr") or "").strip()
+            notes = (request.POST.get("notes") or "").strip()
+
+            errors = []
+            try:
+                qty_kg = Decimal(qty_raw)
+                if qty_kg <= 0:
+                    raise ValueError()
+            except Exception:
+                errors.append("Quantity (kg) must be a positive number.")
+
+            try:
+                rate_pkr = int(rate_raw)
+                if rate_pkr < 0:
+                    raise ValueError()
+            except Exception:
+                errors.append("Unit cost (PKR/kg) must be a whole number ≥ 0.")
+
+            if errors:
+                for e in errors:
+                    messages.error(request, e)
+                return TemplateResponse(request, "core/admin/raw_material/sell.html", ctx)
+
+            try:
+                with transaction.atomic():
+                    txn = RawMaterialTxn(
+                        kind=RawMaterialTxn.Kind.SALE,
+                        to_customer=customer,     # the customer in URL
+                        qty_kg=qty_kg,
+                        rate_pkr=rate_pkr,        # the SELLING rate you type in the form
+                        memo=notes,
+                    )
+                    txn.apply(user=request.user)
+                messages.success(request, f"Sale recorded. Txn #{txn.pk}.")
+            except Exception as e:
+                messages.error(request, f"Could not record sale: {e}")
+                return TemplateResponse(request, "core/admin/raw_material/sell.html", ctx)
+
+            return redirect(reverse("admin:core_customer_change", args=[pk]))
+
+        return TemplateResponse(request, "core/admin/raw_material/sell.html", ctx)
+    def rm_sales_total_pkr(self, obj):
+        agg = RawMaterialTxn.objects.filter(
+            kind=RawMaterialTxn.Kind.SALE, to_customer=obj
+        ).aggregate(s=Sum("amount_pkr"))
+        return f"PKR { (agg['s'] or 0):, }"
+    rm_sales_total_pkr.short_description = "Raw Material Sales (PKR)"
+    # ---------- TRANSFER (Customer → Customer) ----------
+    def transfer_material(self, request, pk):
+        self._check_perm_or_403(request)
+        # Here, 'customer' is the FROM party (source)
+        from_customer = Customer.objects.get(pk=pk)
+        ctx = self._raw_material_base_ctx(request, from_customer, f"Transfer Raw Material — {from_customer}")
+
+        if request.method == "POST":
+            to_id_raw = (request.POST.get("to_customer_id") or "").strip()
+            qty_raw = (request.POST.get("qty_kg") or "").strip()
+            notes = (request.POST.get("notes") or "").strip()
+
+            errors = []
+            try:
+                to_id = int(to_id_raw)
+                to_customer = Customer.objects.get(pk=to_id)
+            except Exception:
+                to_customer = None
+                errors.append("Select a valid target customer.")
+
+            try:
+                qty_kg = Decimal(qty_raw)
+                if qty_kg <= 0:
+                    raise ValueError()
+            except Exception:
+                errors.append("Quantity (kg) must be a positive number.")
+
+            if to_customer and to_customer.pk == from_customer.pk:
+                errors.append("From/To customers must be different.")
+
+            # Optional rate for transfers (set to 0 if not used)
+            rate_pkr = int((request.POST.get("unit_cost_pkr") or 0) or 0)
+
+            if errors:
+                for e in errors:
+                    messages.error(request, e)
+                # Provide list of other customers in ctx if your template needs it
+                ctx["other_customers"] = Customer.objects.exclude(pk=from_customer.pk)
+                return TemplateResponse(request, "core/admin/raw_material/transfer.html", ctx)
+
+            try:
+                with transaction.atomic():
+                    txn = RawMaterialTxn(
+                        kind=RawMaterialTxn.Kind.TRANSFER,
+                        from_customer=from_customer,
+                        to_customer=to_customer,
+                        qty_kg=qty_kg,
+                        rate_pkr=rate_pkr,
+                        memo=notes,
+                    )
+                    txn.apply(user=request.user)
+                messages.success(request, f"Transfer recorded. Txn #{txn.pk}.")
+            except Exception as e:
+                messages.error(request, f"Could not record transfer: {e}")
+                ctx["other_customers"] = Customer.objects.exclude(pk=from_customer.pk)
+                return TemplateResponse(request, "core/admin/raw_material/transfer.html", ctx)
+
+            return redirect(reverse("admin:core_customer_change", args=[pk]))
+
+        # GET: you probably want a dropdown of other customers
+        ctx["other_customers"] = Customer.objects.exclude(pk=from_customer.pk)
+        return TemplateResponse(request, "core/admin/raw_material/transfer.html", ctx)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+
+        # Sum of IN deltas (positive)
+        qs = qs.annotate(
+            material_in=Coalesce(
+                Sum(
+                    "material_ledger__delta_kg",
+                    filter=Q(material_ledger__delta_kg__gt=0),
+                    output_field=KG,
+                ),
+                Value(Decimal("0"), output_field=KG),
+            ),
+            # Sum of negative deltas (OUT) as a negative number
+            material_out_neg=Coalesce(
+                Sum(
+                    "material_ledger__delta_kg",
+                    filter=Q(material_ledger__delta_kg__lt=0),
+                    output_field=KG,
+                ),
+                Value(Decimal("0"), output_field=KG),
+            ),
+        ).annotate(
+            # Turn negative OUT into a positive used kg
+            out_kg=ExpressionWrapper(-F("material_out_neg"), output_field=KG),
+            # Available = IN - OUT
+            available_kg=ExpressionWrapper(F("material_in") - F("out_kg"), output_field=KG),
+            # Total production == OUT (what you actually produced/consumed)
+            production_kg=F("out_kg"),
         )
 
-        extra_context.update(
-            {
-                "statement_download_url": download_url,
-                "statement_preview_url": preview_url,
-                "months": months,
-                "years": years,
-                "default_month": default_month,
-                "default_year": default_year,
-                "cash_ledger_url": cash_ledger_url,
-                "material_ledger_url": material_ledger_url,
-                "allocation_ledger_url": allocation_ledger_url,
-            }
-        )
-        return super().change_view(request, object_id, form_url, extra_context=extra_context)
+        return qs
+
+    # Displays
+    def total_production_display(self, obj):
+        return f"{(obj.production_kg or Decimal('0')):,.3f} kg"
+    total_production_display.short_description = "Total Production"
+    total_production_display.admin_order_field = "production_kg"
+
+    def total_available_material_display(self, obj):
+        return f"{(obj.available_kg or Decimal('0')):,.3f} kg"
+    total_available_material_display.short_description = "Available Material"
+    total_available_material_display.admin_order_field = "available_kg"
+
+def _company_stock():
+    return RawMaterialTxn.company_stock_customer()
 
 class PurchasePaymentInline(admin.TabularInline):
     model = RawMaterialPurchasePayment
@@ -489,57 +688,95 @@ class RawMaterialTxnAdminForm(forms.ModelForm):
         if kind == RawMaterialTxn.Kind.PURCHASE:
             self.fields["to_customer"].widget = forms.HiddenInput()
 
-class PurchasePaymentInline(admin.TabularInline):
-    model = RawMaterialPurchasePayment
-    extra = 1
-    autocomplete_fields = ("payment",)
-
-@admin.register(RawMaterialTxn)
 class RawMaterialTxnAdmin(admin.ModelAdmin):
-    list_display = ("when","kind","supplier_name","from_customer","to_customer","qty_kg","rate_display","Total_Amount","supplier_due_display","dc_number")
-    list_filter  = ("kind","when","material_type")
-    search_fields = ("supplier_name","dc_number","memo","to_customer__company_name","from_customer__company_name")
-    autocomplete_fields = ("from_customer","to_customer")
-    inlines = (PurchasePaymentInline,)
+    form = RawMaterialTxnAdminForm
+    list_display = ("id","kind","when","supplier_name","to_customer","qty_kg","rate_pkr","amount_pkr")
+    list_filter  = ("kind","when","supplier_name")
+    search_fields = ("supplier_name","to_customer__company_name","memo")
+    date_hierarchy = "when"
+    # Don’t ever show these in the form
 
-    # Keep your server-side safety (apply() calculates and writes ledger)
-    def save_model(self, request, obj, form, change):
+    exclude = ("amount_pkr", "from_customer", "created_by",)
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+
+        # figure out kind being edited/created
+        kind = request.POST.get("kind") or getattr(obj, "kind", RawMaterialTxn.Kind.PURCHASE)
+
+        # Hide company-stock side automatically
+        # PURCHASE -> to_customer is always company stock (hide it)
+        # SALE     -> from_customer is always company stock (already excluded)
+        if "to_customer" in form.base_fields and kind == RawMaterialTxn.Kind.PURCHASE:
+            form.base_fields["to_customer"].widget = forms.HiddenInput()
+
+        # amount_pkr is excluded; if you want a read-only display, add a readonly field instead
+
+        # Optional: relabel fields for clarity
+        if "when" in form.base_fields:
+            form.base_fields["when"].label = "Date of Purchase"
+        if "rate_pkr" in form.base_fields:
+            form.base_fields["rate_pkr"].label = "Rate of Purchase (PKR/kg)"
+        if "supplier_name" in form.base_fields:
+            form.base_fields["supplier_name"].label = "Supplier Name"
+
+        return form
+    def _paid_total(self, obj):
+        if not obj:
+            return 0
+        # adjust path if your Payment.amount field differs
+        return sum((link.payment.amount or 0) for link in obj.linked_payments.select_related("payment"))
+
+    def paid_total_display(self, obj):
+        return f"PKR {self._paid_total(obj):,}" if obj else "—"
+    paid_total_display.short_description = "Paid (linked payments)"
+
+    def remaining_display(self, obj):
+        if not obj:
+            return "—"
+        remaining = (obj.amount_pkr or 0) - self._paid_total(obj)
+        return f"PKR {remaining:,}"
+    remaining_display.short_description = "Remaining"
+
+    def amount_display(self, obj):
+        return f"PKR {obj.amount_pkr:,}" if obj and obj.amount_pkr else "—"
+    amount_display.short_description = "Amount (PKR)"
+
+    def get_fields(self, request, obj=None):
+        # Order the form fields as you requested and show a read-only total next to rate
+        return [
+            "kind",
+            "material_type",
+            "when",              # Date of Purchase
+            "supplier_name",
+            "dc_number",
+            "bags_count",        # Bags (25kg each)
+            "rate_pkr",
+            "to_customer",       # visible for SALE, hidden by form for PURCHASE
+            "memo",
+        ]
+
+@transaction.atomic
+def save_model(self, request, obj, form, change):
+    if not obj.created_by_id:
+        obj.created_by = request.user
+
+    cs = RawMaterialTxn.company_stock_customer()
+    if obj.kind == RawMaterialTxn.Kind.PURCHASE:
+        obj.from_customer = None
+        obj.to_customer = cs
+    elif obj.kind == RawMaterialTxn.Kind.SALE:
+        obj.from_customer = cs
+
+    if change:
+        # EDIT: just save fields; do NOT re-apply ledger to avoid duplicates
+        obj.full_clean()
+        obj.save()
+    else:
+        # CREATE: write ledger entries
         obj.apply(user=request.user)
-        form.save_m2m()
 
-    @admin.display(description="Rate Per (KG)")
-    def rate_display(self, obj):
-        return money_int_pk(obj.rate_pkr)    
-    @admin.display(description="Outstanding (PKR)")
-    def supplier_due_display(self, obj):
-        if obj.kind != RawMaterialTxn.Kind.PURCHASE:
-            return "—"
-        return money_int_pk(obj.supplier_outstanding_pkr)
-    @admin.display(description="Total Payment Due (PKR)")
-    def Total_Amount(self, obj):
-        if obj.kind != RawMaterialTxn.Kind.PURCHASE:
-            return "—"
-        # uses the property we added: amount_pkr - linked supplier payments (never negative)
-        return money_int_pk(obj.amount_pkr)
-        
-    class Media:
-        # put the JS below at: core/static/core/admin/raw_material_txn.js
-        js = ("core/admin/raw_material_txn.js",)
-
-    # Compute and write ledgers through the model API
-    def save_model(self, request, obj, form, change):
-        # For PURCHASE, derive qty again here for safety (matches model.clean)
-        if obj.kind == RawMaterialTxn.Kind.PURCHASE:
-            obj.qty_kg = dkg(Decimal(obj.bags_count or 0) * BAG_WEIGHT_KG)
-        # Amount is always auto for PURCHASE/SALE; model.clean also enforces it
-        obj.apply(user=request.user)  # does clean(), computes, saves, and writes ledger rows
-        form.save_m2m()
-
-@admin.register(SupplierPayment)
-class SupplierPaymentAdmin(admin.ModelAdmin):
-    list_display = ("paid_on","supplier_name","method","bank","reference","amount_pkr","notes")
-    list_filter  = ("method","bank","paid_on")
-    search_fields = ("supplier_name","reference","notes")
+admin.site.register(RawMaterialTxn, RawMaterialTxnAdmin)
 
 class PaymentStatusFilter(admin.SimpleListFilter):
     title = 'Payment Status'
@@ -577,8 +814,8 @@ class MaterialReceiptAdmin(admin.ModelAdmin):
 
 @admin.register(CustomerMaterialLedger)
 class CustomerMaterialLedgerAdmin(admin.ModelAdmin):
-    list_display  = ('customer', 'date', 'type', 'delta_kg', 'material_type', 'order', 'receipt', 'memo')
-    list_filter   = ('type', 'customer', 'date', 'material_type')
+    list_display  = ('customer', 'date', 'type', 'delta_kg', 'order', 'receipt', 'memo')
+    list_filter   = ('type', 'customer', 'date')
     search_fields = ('customer__company_name', 'memo')
     date_hierarchy = 'date'
     ordering = ('-date', '-id')
@@ -673,19 +910,7 @@ class OrderAdmin(admin.ModelAdmin):
         
         
     )
-    # @property
-    def total_allocated_pkr(self) -> int:
-        """
-        Sum of allocations INCLUDING rounding write-off.
-        """
-        agg = self.payment_allocations.aggregate(
-            s=Coalesce(
-                Sum(F("amount") + F("rounding_pkr"), output_field=IntegerField()),
-                0,
-                output_field=IntegerField(),
-            )
-        )
-        return int(agg["s"] or 0)
+
     # Pretty columns
     def subtotal_display(self, obj):
         return f"{obj.subtotal:,.2f}"
@@ -930,157 +1155,3 @@ class SiteSettingsAdmin(admin.ModelAdmin):
         return form
 
 
-# # ----- Inline (read-only) lines on a statement -----
-# class StatementLineInline(admin.TabularInline):
-#     model = StatementLine
-#     extra = 0
-#     fields = ("date","line_type","description","order","payment","qty_kg","rate","amount_pkr")
-#     readonly_fields = fields
-#     can_delete = False
-#     def has_add_permission(self, request, obj=None): return False
-
-# def _sum_qs(qs):
-#     val = qs.aggregate(total=Sum("amount_pkr"))["total"]
-#     return int(val or 0)
-
-# @admin.register(MonthlyStatement)
-# class MonthlyStatementAdmin(admin.ModelAdmin):
-#     list_display  = ("customer","period","opening_live","charges_live","credits_live","closing_live","opening_mode","closing_override_enabled","frozen")
-#     list_filter   = ("year","month","opening_mode","closing_override_enabled","frozen")
-#     search_fields = ("customer__company_name",)
-
-#     fieldsets = (
-#         ("Statement Period", {"fields": ("customer","year","month","generated_at","frozen")}),
-#         ("Carry-forward / Opening", {
-#             "fields": ("opening_mode","opening_manual_pkr","opening_live"),
-#             "description": "AUTO = previous month closing (or OPENING lines / customer's carry-forward). MANUAL uses the value below."
-#         }),
-#         ("Totals (live, read-only)", {
-#             "fields": ("charges_live","credits_live","closing_live"),
-#         }),
-#         ("Reconciliation", {                     # <-- this renders the box
-#             "fields": ("reconciliation",),
-#         }),
-#         ("Closing Override (optional)", {
-#             "fields": ("closing_override_enabled","closing_override_pkr"),
-#             "description": "Enable to force a specific closing; we add one ADJ line to reach it."
-#         }),
-#         ("Credits allocation (informational)", {"fields": ("credits_breakdown",)}),
-#     )
-
-#     # include the computed field in readonly_fields so Admin allows it in fieldsets
-#     readonly_fields = ("opening_live","charges_live","credits_live","closing_live","reconciliation","close_and_carry_forward", "unfreeze_statements","credits_breakdown","generated_at")
-
-#     actions = ["action_recompute_and_persist","freeze_statements","unfreeze_statements"]
-
-
-#     @admin.display(description="Credits breakdown (this month)")
-#     def credits_breakdown(self, obj):
-#         b = obj.credits_breakdown_pkr()
-#         html = f"""
-#         <table class="grp-table">
-#         <tr><th>Cash received</th><td style="text-align:right">{b['cash_total']:,}</td></tr>
-#         <tr><th>Applied to prior months</th><td style="text-align:right">− {b['applied_prior']:,}</td></tr>
-#         <tr><th>Applied to this month</th><td style="text-align:right">− {b['applied_current']:,}</td></tr>
-#         <tr><th>Applied to future</th><td style="text-align:right">− {b['applied_future']:,}</td></tr>
-#         <tr><th>Unapplied (on account)</th><td style="text-align:right">= {b['unapplied']:,}</td></tr>
-#         <tr><th>Rounding total</th><td style="text-align:right">{b['rounding_delta']:,}</td></tr>
-#         </table>
-#         """
-#         return mark_safe(html)
-
-
-#     @admin.action(description="Close month & carry forward closing to customer")
-#     def close_and_carry_forward(self, request, queryset):
-#         n = 0
-#         for st in queryset:
-#             if st.frozen:
-#                 # already closed; still refresh and re-carry in case numbers changed
-#                 st.recompute(save=True)
-#             else:
-#                 st.frozen = True
-#                 st.recompute(save=True)
-#                 st.save(update_fields=["frozen"])
-#             propagate_carry_forward(st)
-#             n += 1
-#         messages.success(request, f"Closed & carried forward {n} statement(s).")
-    
-#     @admin.action(description="Unfreeze selected")
-#     def unfreeze_statements(self, request, queryset):
-#         updated = queryset.update(frozen=False)
-#         messages.success(request, f"Unfrozen {updated} statement(s).")
-
-    
-
-#     def period(self, obj):  # list_display helper
-#         return f"{obj.year}-{obj.month:02d}"
-
-#     # ---------- LIVE totals (computed on the fly) ----------
-#     def opening_live(self, obj):
-#         return obj._compute_opening()
-
-#     def charges_live(self, obj):
-#         qs = obj.lines.filter(line_type__in=["ORDER","RAW_IN","ADJ"])
-#         if not obj.closing_override_enabled:
-#             qs = qs.exclude(description=CLOSING_OVERRIDE_DESC)
-#         return _sum_qs(qs)
-
-#     def credits_live(self, obj):
-#         return abs(_sum_qs(obj.lines.filter(line_type="PAY")))
-
-#     def closing_live(self, obj):
-#         return int(self.opening_live(obj)) + int(self.charges_live(obj)) - int(self.credits_live(obj))
-
-#     # ---------- Reconciliation box (this is what was missing) ----------
-#     @admin.display(description="Reconciliation (this month)")
-#     def reconciliation(self, obj):
-#         order_rows = obj.lines.filter(line_type="ORDER") \
-#                               .values_list("order__invoice_number","amount_pkr") \
-#                               .order_by("id")
-
-#         o_total = _sum_qs(obj.lines.filter(line_type="ORDER"))
-#         r_total = _sum_qs(obj.lines.filter(line_type="RAW_IN"))
-#         a_total = _sum_qs(obj.lines.filter(line_type="ADJ").exclude(description=CLOSING_OVERRIDE_DESC))
-#         p_total = abs(_sum_qs(obj.lines.filter(line_type="PAY")))
-
-#         rows_html = "".join(
-#             f"<tr><td>{inv or ''}</td><td style='text-align:right'>{int(amt or 0):,}</td></tr>"
-#             for inv, amt in order_rows
-#         )
-
-#         html = f"""
-#         <table class="grp-table">
-#           <tr><th>Invoice</th><th style='text-align:right'>Amount</th></tr>
-#           {rows_html}
-#           <tr><td><b>ORDER total</b></td><td style='text-align:right'><b>{o_total:,}</b></td></tr>
-#           <tr><td><b>RAW_IN total</b></td><td style='text-align:right'><b>{r_total:,}</b></td></tr>
-#           <tr><td><b>ADJ total</b></td><td style='text-align:right'><b>{a_total:,}</b></td></tr>
-#           <tr><td><b>PAY (credits)</b></td><td style='text-align:right'><b>{p_total:,}</b></td></tr>
-#         </table>
-#         """
-#         return mark_safe(html)
-
-#     # ---------- Persist stored totals, so exports/PDFs match live ----------
-#     @admin.action(description="Recompute & persist totals")
-#     def action_recompute_and_persist(self, request, queryset):
-#         n = 0
-#         for st in queryset:
-#             st.recompute(save=True)
-#             n += 1
-#         messages.success(request, f"Recomputed {n} statement(s).")
-
-#     @admin.action(description="Freeze selected")
-#     def freeze_statements(self, request, queryset):
-#         messages.success(request, f"Frozen {queryset.update(frozen=True)} statement(s).")
-
-#     @admin.action(description="Unfreeze selected")
-#     def unfreeze_statements(self, request, queryset):
-#         messages.success(request, f"Unfrozen {queryset.update(frozen=False)} statement(s).")
-
-#     def save_model(self, request, obj, form, change):
-#         # keep stored totals aligned whenever you toggle fields in admin
-#         super().save_model(request, obj, form, change)
-#         obj.recompute(save=True)
-#         # If user checked 'frozen' and saved, carry forward immediately
-#         if "frozen" in form.changed_data and obj.frozen:
-#             propagate_carry_forward(obj)
