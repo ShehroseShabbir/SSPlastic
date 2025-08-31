@@ -42,7 +42,7 @@ class SiteSettingsAdmin(admin.ModelAdmin):
             "fields": ("tax_label", "tax_rate")
         }),
         ("Banking (PDF footer)", {
-            "fields": ("bank_details",)
+            "fields": ("notes","bank_details",)
         }),
         ("Email (optional overrides)", {
             "description": "Leave blank to use project settings.py EMAIL_* values.",

@@ -6,7 +6,7 @@ class SiteSettings(models.Model):
     company_name = models.CharField(max_length=255, blank=True, default="")
     company_address = models.TextField(blank=True, default="")  # multi-line
     bank_details = models.TextField(blank=True, default="")     # multi-line
-    notes = models.TextField(blank=True, default="")     # multi-line
+    notes = models.TextField(blank=True, default="", help_text="Please put any notes you want to include in bills in footer")     # multi-line
     logo = models.ImageField(upload_to="branding/", null=True, blank=True)
 
     # Tax
@@ -33,6 +33,10 @@ class SiteSettings(models.Model):
     @property
     def company_address_list(self):
         return [ln.strip() for ln in (self.company_address or "").splitlines() if ln.strip()]
+    
+    @property
+    def notes_list(self):
+        return [ln.strip() for ln in (self.notes or "").splitlines() if ln.strip()]
 
     @property
     def bank_details_list(self):

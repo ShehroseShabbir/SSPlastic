@@ -182,7 +182,7 @@ class PaymentAllocationAdmin(admin.ModelAdmin):
 @admin.register(Payment)
 class PaymentAdmin(admin.ModelAdmin):
     list_display = ("id", "customer", "received_on", "method", "reference",
-                    "amount", "allocated_amount", "unapplied_amount")
+                    "amount_display", "allocated_amount_display", "unapplied_amount_display")
     list_filter = ("method", "received_on", "customer")
     search_fields = ("reference", "customer__company_name")
     inlines = [PaymentAllocationInline]
@@ -190,6 +190,37 @@ class PaymentAdmin(admin.ModelAdmin):
     actions = ["auto_apply_selected"]
     ordering = ("-received_on", "-id")
     list_per_page = 50
+
+    @admin.display(description="Amount (PKR)")
+    def amount_display(self, obj):
+        # Shows 0 once payments ≥ initial carry
+        return money_int_pk(obj.amount)
+    
+    @admin.display(description="Allocated (PKR)")
+    def allocated_amount_display(self, obj):
+        # Shows 0 once payments ≥ initial carry
+        return money_int_pk(obj.allocated_amount)
+    
+    @admin.display(description="Leftover (PKR)")
+    def unapplied_amount_display(self, obj):
+        # Shows 0 once payments ≥ initial carry
+        return money_int_pk(obj.unapplied_amount)
+    
+    @admin.display(description="Leftover (PKR)")
+    def unapplied_amount_display(self, obj):
+        # prefer stored field; fallback to live compute
+        val = getattr(obj, "unapplied_amount", None)
+        if val is None:
+            val = obj.unapplied_amount
+        try:
+            n = int(val or 0)
+        except (TypeError, ValueError):
+            n = 0
+
+        if n >= 0:
+            return f"PKR {n:,}"
+        # overpaid → show positive with credit label
+        return f"PKR {abs(n):,} (credit)"
 
 class OrderAllocationInlineReadonly(admin.TabularInline):
     model = PaymentAllocation
@@ -915,19 +946,7 @@ class SalaryPaymentAdmin(admin.ModelAdmin):
     search_fields = ('employee__name',)
     date_hierarchy = 'payment_date'
     
-class SiteSettingsAdmin(admin.ModelAdmin):
-    fieldsets = (
-        ("Branding", {"fields": ("company_name", "company_address", "logo")}),
-        ("Tax", {"fields": ("tax_label", "tax_rate")}),
-        ("Banking", {"fields": ("notes","bank_details")}),
-        ("Email (optional)", {"fields": ("email_host", "email_port", "email_use_tls", "email_host_user", "email_host_password"), "classes": ("collapse",)}),
-    )
-    list_display = ("company_name", "tax_label", "tax_rate")
-    def get_form(self, request, obj=None, **kwargs):
-        form = super().get_form(request, obj, **kwargs)
-        # DEBUG: see fields the form thinks it has
-        print("SiteSettingsAdmin fields ->", list(form.base_fields.keys()))
-        return form
+
 
 
 # # ----- Inline (read-only) lines on a statement -----
