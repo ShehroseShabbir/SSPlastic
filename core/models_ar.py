@@ -67,8 +67,8 @@ class PaymentAllocation(models.Model):
 
     class Meta:
         unique_together = [("payment", "order")]
-        verbose_name = "Allocate Payment"
-        verbose_name_plural = "Allocate Payments"
+        verbose_name = "Payments Ledger"
+        verbose_name_plural = "Payments Ledger"
 
     def __str__(self):
         inv = getattr(self.order, "invoice_number", self.order_id)

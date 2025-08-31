@@ -10,7 +10,6 @@ from .common import MICRON_CHOICES, CURRENT_TYPES, MICRON_HELP, COUNTRIES
 from django.db.models import Sum
 from django.utils.decorators import method_decorator
 from django.views.decorators.http import require_POST
-from django.http import JsonResponse, HttpResponseRedirect
 
 
 

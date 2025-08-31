@@ -13,117 +13,87 @@ from ..models_ar import FINAL_STATES
 
 
 class Customer(models.Model):
+    # --- Basic info ---
     company_name = models.CharField(max_length=255)
     contact_name = models.CharField(max_length=255, blank=True)
-    country = models.CharField(max_length=50, blank=True)
-    phone = models.CharField(max_length=20, blank=True)
-    email = models.EmailField(blank=True)
-    address = models.TextField(blank=True)
+    country      = models.CharField(max_length=50, blank=True)
+    phone        = models.CharField(max_length=20, blank=True)
+    email        = models.EmailField(blank=True)
+    address      = models.TextField(blank=True)
+
+    # --- A/R: simple running balance ---
     previous_pending_balance_pkr = models.IntegerField(
         default=0,
-        help_text="Carry-forward A/R from previous month in whole rupees (PKR)."
+        help_text="Initial carry-forward (once). In whole rupees."
+    )
+    pending_balance_pkr = models.IntegerField(
+        default=0,
+        help_text="Auto: carry + final orders − payments (int PKR)."
     )
     @property
-    def ar_invoices_total(self) -> Decimal:
-        total = Decimal("0.00")
-        qs = self.orders.filter(status__in=FINAL_STATES).select_related("customer").prefetch_related("rolls")
-        for o in qs:
-            total += (o.grand_total or Decimal("0.00"))
-        return total.quantize(Decimal("0.01"))
-
-    @property
-    def ar_allocations_total(self) -> Decimal:
-        from ..models_ar import PaymentAllocation
-        agg = PaymentAllocation.objects.filter(
-            order__customer=self,
-            order__status__in=FINAL_STATES
-        ).aggregate(s=Sum("amount"))
-        return (Decimal(agg["s"] or 0)).quantize(Decimal("0.01"))
-
-    @property
-    def ar_unapplied_payments(self) -> Decimal:
-        total = Decimal("0.00")
-        for p in self.payments_ar.all():
-            total += (p.unapplied_amount or Decimal("0.00"))
-        return total.quantize(Decimal("0.01"))
-
-    @property
-    def ar_pending_balance(self) -> Decimal:
-        return (self.ar_invoices_total - self.ar_allocations_total).quantize(Decimal("0.01"))
-
-    @property
-    def ar_net_position(self) -> Decimal:
-        return (self.ar_pending_balance - self.ar_unapplied_payments).quantize(Decimal("0.01"))
-
-    @property
-    def material_balance_kg(self):
-        agg = self.material_ledger.aggregate(s=Sum('delta_kg'))
-        return agg['s'] or Decimal('0')
-
-      # ---------- NEW: Computed totals (properties) ----------
-    @property
-    def total_material_kg(self) -> Decimal:
+    def carry_remaining_pkr(self) -> int:
         """
-        Sum of ALL material ledger entries (IN minus OUT) = current balance (kg).
-        Mirrors material_balance_kg, but explicitly typed and 3dp.
+        Display-only: treat all positive payments as reducing carry-forward first.
+        Returns max(carry − sum(positive payments), 0).
         """
+        from core.models_ar import Payment
+        from core.utils_money import to_rupees_int as _toint
+
+        carry = int(self.previous_pending_balance_pkr or 0)
+        # sum ONLY positive payments (ignore refunds which are negative)
+        paid = 0
+        for p in Payment.objects.filter(customer=self).only("amount"):
+            n = _toint(p.amount)
+            if n > 0:
+                paid += n
+        remaining = carry - paid
+        return remaining if remaining > 0 else 0
+    # ---- Material balance (kg) ----
+    @property
+    def material_balance_kg(self) -> Decimal:
+        """
+        Net KG = sum of material ledger deltas (IN minus OUT). 3dp decimal.
+        """
+        KG = DecimalField(max_digits=12, decimal_places=3)
         agg = self.material_ledger.aggregate(
-            s=Coalesce(Sum("delta_kg", output_field=DecimalField(max_digits=12, decimal_places=3)),
-                       Value(Decimal("0.000"), output_field=DecimalField(max_digits=12, decimal_places=3)))
+            s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
         )
         return agg["s"] or Decimal("0.000")
 
+    # ---- Pending balance (live compute fallback) ----
     @property
-    def total_material_lifetime_kg(self) -> Decimal:
+    def pending_balance_live_pkr(self) -> int:
         """
-        Sum of IN entries only over lifetime (kg).
+        Live calculation (no stored field needed):
+        carry + sum(final orders) − sum(payments), in whole rupees.
         """
-        agg = self.material_ledger.filter(delta_kg__gt=0).aggregate(
-            s=Coalesce(Sum("delta_kg", output_field=DecimalField(max_digits=12, decimal_places=3)),
-                       Value(Decimal("0.000"), output_field=DecimalField(max_digits=12, decimal_places=3)))
-        )
-        return agg["s"] or Decimal("0.000")
+        FINAL_STATES = ("READY", "DELIVERED", "CLOSED")
+        Order   = apps.get_model("core", "Order")
+        Payment = apps.get_model("core", "Payment")
 
-    @property
-    def total_remaining_kg(self) -> Decimal:
-        """
-        Remaining (target - produced) across NON-final orders.
-        Uses the Python property Order.remaining_kg (safe).
-        """
-        total = Decimal("0.000")
-        # Consider these "open" for remaining: DRAFT/CONFIRMED/INPROD/READY
-        open_statuses = ("DRAFT", "CONFIRMED", "INPROD", "READY")
-        for o in self.orders.only("id", "status", "target_total_kg").filter(status__in=open_statuses):
-            try:
-                total += (o.remaining_kg or Decimal("0.000"))
-            except Exception:
-                pass
-        return total
-    # ---------- NEW: Carry-forward aware pending (rupees int) ----------
-    @property
-    def ar_pending_balance_pkr(self) -> int:
-        """
-        ar_pending_balance is Decimal(2dp). Convert to whole rupees (int).
-        """
-        try:
-            return to_rupees_int(self.ar_pending_balance)
-        except Exception:
-            return 0
+        # Sum of final/billable orders in PKR-int
+        charges = sum(int(getattr(o, "grand_total_pkr", 0) or 0)
+                      for o in Order.objects.filter(customer=self, status__in=FINAL_STATES))
 
-    @property
-    def ar_total_due_with_carry_pkr(self) -> int:
-        """
-        Current pending (int rupees) + carry-forward (int rupees).
-        """
-        return int(self.ar_pending_balance_pkr) + int(self.previous_pending_balance_pkr)
+        # Sum of all payments received (convert Decimal → int rupees)
+        # Avoid importing helpers at module import time to prevent circulars.
+        from core.utils_money import to_rupees_int as _toint
+        payments = sum(_toint(p.amount) for p in Payment.objects.filter(customer=self))
 
-    # ---------- Optional helper setter ----------
-    def set_previous_pending_balance(self, amount) -> None:
+        carry = int(self.previous_pending_balance_pkr or 0)
+        return carry + int(charges) - int(payments)
+
+    # ---- Convenience: persist the live value into the stored field ----
+    def refresh_pending_balance(self, save: bool = True) -> int:
         """
-        Store carry-forward as int rupees (accepts int/Decimal/str).
+        Recalculate and (optionally) store into pending_balance_pkr.
+        Returns the new pending (int).
         """
-        self.previous_pending_balance_pkr = money_int_pk(to_rupees_int(amount))
-        self.save(update_fields=["previous_pending_balance_pkr"])
+        val = self.pending_balance_live_pkr
+        if save:
+            self.pending_balance_pkr = int(val)
+            self.save(update_fields=["pending_balance_pkr"])
+        return int(val)
 
     def __str__(self):
         return self.company_name

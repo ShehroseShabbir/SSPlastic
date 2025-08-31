@@ -2,6 +2,8 @@ from decimal import Decimal
 from django.db import models
 from django.db.models import Q, UniqueConstraint
 
+from core.models.customers import Customer
+from core.models.orders import Order
 from core.utils_weight import dkg
 
 # MaterialReceipt
@@ -12,7 +14,7 @@ class MaterialReceipt(models.Model):
     """
     BAG_WEIGHT_KG = Decimal('25')  # default bag size
 
-    customer = models.ForeignKey('Customer', on_delete=models.CASCADE, related_name='material_receipts')
+    customer = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='material_receipts')
     date = models.DateField(help_text="Date of Material Received")
     bags_count = models.PositiveIntegerField(default=0)         # e.g. 4 bags
     extra_kg = models.DecimalField(max_digits=10, decimal_places=3, default=0)  # non-bag kg if any
@@ -29,20 +31,25 @@ class MaterialReceipt(models.Model):
         verbose_name_plural = "Material Receipts"
     
 class CustomerMaterialLedger(models.Model):
+    
     class EntryType(models.TextChoices):
         IN = "IN", "In"
         OUT = "OUT", "Out"
+    # NEW: classify the material in each ledger row
+    class MaterialKind(models.TextChoices):
+        FILM = "FILM", "Film"
+        TAPE = "TAPE", "Tape"
 
     customer = models.ForeignKey(
-        "Customer", on_delete=models.CASCADE, related_name="material_ledger"
+        Customer, on_delete=models.CASCADE, related_name="material_ledger"
     )
     # keep ONLY ONE order FK
     order = models.ForeignKey(
-        "Order", null=True, blank=True, on_delete=models.SET_NULL,
+        Order, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="material_ledger_entries"
     )
     receipt = models.ForeignKey(
-        "MaterialReceipt", null=True, blank=True, on_delete=models.SET_NULL
+        MaterialReceipt, null=True, blank=True, on_delete=models.CASCADE
     )
     
 
@@ -50,6 +57,7 @@ class CustomerMaterialLedger(models.Model):
     type = models.CharField(max_length=3, choices=EntryType.choices)
     delta_kg = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0.000"))
     memo = models.CharField(max_length=255, blank=True)
+    material_type = models.CharField(max_length=10, choices=MaterialKind.choices, blank=True)
 
     class Meta:
         constraints = [
