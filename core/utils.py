@@ -8,14 +8,15 @@ from reportlab.lib.utils import ImageReader
 from reportlab.platypus import Table, TableStyle
 from reportlab.lib import colors
 from reportlab.lib.units import mm
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from calendar import monthrange
-from django.db.models import Sum, Value, Q, DecimalField
+from django.db.models import Sum, Value, DecimalField
 from django.db.models.functions import Coalesce
 from .utils_weight import dkg  # your Decimal quantizer
 # Models
 from .models import Order, MaterialReceipt, Customer, CustomerMaterialLedger  # reuse the single dkg
 from .models_ar import Payment
+from core.models_ar import Payment, FINAL_STATES  # add this
 
 # Money helpers (your new utilities)
 from .utils_money import D, to_rupees_int, round_to
@@ -131,7 +132,19 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     customer = Customer.objects.get(id=customer_id)
     ss = get_site_settings()
     first, last, period_start, period_end = _period_bounds(year, month)
+     # --- Opening (before this month): carry + final invoices ≤ last_month_day − payments ≤ last_month_day ---
+    day_before = first - timedelta(days=1)
 
+    # final/billable orders up to the day before this month
+    charges_before_pkr = sum(
+        int(getattr(o, "grand_total_pkr", 0) or 0)
+        for o in Order.objects.filter(customer=customer, status__in=FINAL_STATES, order_date__lte=day_before)
+    )
+    # all payments up to the day before this month (as int PKR)
+    payments_before_pkr = sum(int(D(p.amount or 0)) for p in Payment.objects.filter(customer=customer, received_on__lte=day_before))
+
+    carry_pkr = int(customer.previous_pending_balance_pkr or 0)
+    opening_due_pkr = carry_pkr + charges_before_pkr - payments_before_pkr
 
       # --- Invoices (ALL non-draft in period) ---
     orders = (
@@ -148,6 +161,9 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     total_inv   = Decimal("0.00")
     total_paid  = Decimal("0.00")
     total_due   = Decimal("0.00")
+    charges_period_pkr = 0      # add
+    payments_period_pkr = 0   # add
+
 
     for o in orders:
         qty_kg = dkg(getattr(o, "target_total_kg", 0) or 0)
@@ -166,6 +182,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
         total_inv  += invoice_total
         total_paid += paid
         total_due  += due
+        charges_period_pkr += int(getattr(o, "grand_total_pkr", 0) or 0)  # add
 
         rows_orders.append([
             str(getattr(o, "delivery_challan_date", "") or getattr(o, "order_date", "") or ""),
@@ -200,6 +217,8 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     for p in payments_qs:
         amt = D(p.amount or 0)
         payments_total += amt
+        payments_period_pkr += int(D(p.amount or 0))   # add (keeps your theme; you already list p.amount)
+
         note_bits = []
         if getattr(p, "reference", ""):
             note_bits.append(str(p.reference))
@@ -247,9 +266,13 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
                 str(mr.date),
                 str(mr.notes or "—"),
                 f"{qty:,.3f}",
+                str(getattr(r, "material_type", "") or "-"),
             ])
 
     rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
+
+    closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) - int(payments_period_pkr)
+
     # ===========================
     # 4) MATERIAL BALANCE SUMMARY (DateTimeField) -> use period_start/period_end
     # ===========================
@@ -346,6 +369,41 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     # Set y for further content
     y = meta_y - 24
 
+     # === Bill Summary (this month) ===
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, f"Bill Summary ({month_name} {year})")
+    y -= 12
+
+    # show "Advance (credit)" instead of a minus
+    closing_label = "Balance due (carry to next bill)" if closing_due_pkr >= 0 else "Advance on account (credit)"
+    closing_value  = abs(int(closing_due_pkr))
+
+    summary_rows = [
+        [f"Opening balance (before {month_name} {year})", pkr_str(opening_due_pkr)],
+        ["+ Charges this month",                                  pkr_str(charges_period_pkr)],
+        ["− Payments received this month",                         pkr_str(payments_period_pkr)],
+        [closing_label,                                           pkr_str(closing_value)],
+    ]
+    sum_base_cols = [300, 140]
+    scale = min(1.0, (W - 2 * margin) / float(sum(sum_base_cols)))
+    sum_col_widths = [w * scale for w in sum_base_cols]
+
+    t_sum = Table(summary_rows, colWidths=sum_col_widths, repeatRows=0)
+    t_sum.setStyle(style)
+
+    tw, th = t_sum.wrapOn(c, W, H)
+    x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines,
+                     ref=f"Statement-{customer.company_name}-{year:04d}-{month:02d}", user=user)
+        c.showPage()
+        _draw_page_header(c, W, H, ss)
+        y = H - margin
+    t_sum.drawOn(c, x_center, y - th)
+    y = y - th - 20
+    
     # --- Table 1: Invoices (All) ---
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, y, "Invoices (All)")
