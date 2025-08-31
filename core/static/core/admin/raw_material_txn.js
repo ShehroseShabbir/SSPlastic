@@ -11,7 +11,7 @@
   function setReadOnly(idSuffix, ro) {
     var el = document.getElementById("id_" + idSuffix);
     if (!el) return;
-    el.readOnly = !!ro; // keep enabled so value posts
+    el.readOnly = !!ro;           // don’t disable; we still want value posted
   }
 
   function toggle() {
@@ -30,52 +30,44 @@
     var rowDC       = byField("dc_number");
     var rowMemo     = byField("memo");
 
-    // Reset: visible & editable
+    // 1) Reset everything to visible & editable
     [rowSupplier,rowFrom,rowTo,rowQty,rowRate,rowAmt,rowMat,rowBags,rowDC,rowMemo]
       .forEach(function(r){ show(r, true); });
     setReadOnly("qty_kg", false);
     setReadOnly("amount_pkr", false);
 
+    // 2) Apply per-kind
     if (k === "PURCHASE") {
-      // Only bags + rate (+ supplier/DC/memo). Qty/amount derived and hidden.
+      // user inputs: supplier, bags, rate, dc, memo
       show(rowFrom, false);
       show(rowTo,   false);
-      show(rowQty,  false);
-      show(rowAmt,  false);
+      show(rowQty,  false);  // derived, hide
       setReadOnly("qty_kg", true);
       setReadOnly("amount_pkr", true);
-      show(rowSupplier, true);
-      show(rowBags, true);
-      show(rowRate, true);
-      show(rowDC, true);
-      show(rowMemo, true);
+      // keep rows visible: supplier, bags, rate, dc, memo, material
       show(rowMat, true);
     } else if (k === "SALE") {
-      // Company stock → customer. Enter qty, rate, to_customer.
+      // from company stock → customer; user inputs qty, rate, to_customer
       show(rowSupplier, false);
-      show(rowBags, false);
-      show(rowFrom, false); // server sets to company stock
-      show(rowTo, true);
-      show(rowQty, true);
-      show(rowRate, true);
-      show(rowAmt, true);
-      show(rowDC, true);
-      show(rowMemo, true);
-      show(rowMat, true);
+      show(rowBags,     false);
+      show(rowFrom,     false); // server sets to company stock
+      show(rowTo,       true);
+      show(rowQty,      true);
+      show(rowRate,     true);
+      show(rowAmt,      true);  // you may let it auto-calc server-side too
+      show(rowDC,       true);
       setReadOnly("qty_kg", false);
       setReadOnly("amount_pkr", false);
     } else if (k === "TRANSFER") {
-      // Customer → customer. Qty only, no money fields.
+      // customer → customer; qty only, no money fields
       show(rowSupplier, false);
-      show(rowBags, false);
-      show(rowRate, false);
-      show(rowAmt, false);
-      show(rowDC, false);
-      show(rowFrom, true);
-      show(rowTo, true);
-      show(rowQty, true);
-      show(rowMemo, true);
-      show(rowMat, true);
+      show(rowBags,     false);
+      show(rowRate,     false);
+      show(rowAmt,      false);
+      show(rowDC,       false);
+      show(rowFrom,     true);
+      show(rowTo,       true);
+      show(rowQty,      true);
       setReadOnly("qty_kg", false);
     }
   }
@@ -85,7 +77,7 @@
     if (!kindSel || kindSel.value !== "PURCHASE") return;
     var bags = parseInt(document.getElementById("id_bags_count")?.value || "0", 10);
     var rate = parseInt(document.getElementById("id_rate_pkr")?.value || "0", 10);
-    var qty  = bags * 25; // 25 kg per bag (display only)
+    var qty  = bags * 25; // display only; server recomputes on save
     var amt  = qty * rate;
     var qtyInput = document.getElementById("id_qty_kg");
     var amtInput = document.getElementById("id_amount_pkr");
@@ -100,14 +92,13 @@
       toggle();
       recalcPurchase();
     });
-
     var bags = document.getElementById("id_bags_count");
     var rate = document.getElementById("id_rate_pkr");
     if (bags) bags.addEventListener("input", recalcPurchase);
     if (rate) rate.addEventListener("input", recalcPurchase);
 
-    toggle();
-    recalcPurchase();
+    toggle();          // initial state on page load
+    recalcPurchase();  // prefill when PURCHASE
   }
 
   if (document.readyState === "loading") {
