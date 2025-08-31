@@ -233,25 +233,26 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
         ])
     rows_payments.append(["", "", "Total", pkr_str(payments_total)])
     # --- Material received in the month ---
+   # --- Material received in the month ---
     receipts_qs = (
-    CustomerMaterialLedger.objects
-    .filter(customer=customer, date__range=(first, last), delta_kg__gt=0)
-    .order_by("date", "id")
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__range=(period_start, period_end), delta_kg__gt=0)
+        .order_by("date", "id")
     )
-    
-    rows_receipts = []
+
+    rows_receipts: list[list[str]] = []
     receipts_total = Decimal("0.000")
 
-    for r in receipts_qs:
-        qty = dkg(r.delta_kg or Decimal("0.000"))
+    for rec in receipts_qs:
+        qty = dkg(Decimal(rec.delta_kg or 0))
         receipts_total += qty
         rows_receipts.append([
-            str(r.date.date()),        # strip time
-            str(r.memo or "—"),
+            rec.date.date().isoformat(),    # strip time
+            str(rec.memo or "—"),
             f"{qty:,.3f}",
         ])
 
-    # Fallback: if for some reason no ledger IN entries exist, pull from MaterialReceipt (DateField)
+    # Fallback if there were no IN ledger rows in the month
     if not rows_receipts:
         mr_qs = (
             MaterialReceipt.objects
@@ -259,14 +260,12 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
             .order_by("date", "id")
         )
         for mr in mr_qs:
-            # total_kg is a @property returning Decimal in kg
-            qty = dkg(getattr(mr, "total_kg", Decimal("0.000")) or Decimal("0.000"))
+            qty = dkg(Decimal(getattr(mr, "total_kg", 0) or 0))
             receipts_total += qty
             rows_receipts.append([
-                str(mr.date),
+                mr.date.isoformat(),
                 str(mr.notes or "—"),
                 f"{qty:,.3f}",
-                str(getattr(r, "material_type", "") or "-"),
             ])
 
     rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
