@@ -26,6 +26,7 @@ from core.models import (
     Employee, Attendance
 )
 from core.models.raw_material import RawMaterialTxn, SupplierPayment, RawMaterialPurchasePayment
+from core.services.purchase_pdf import generate_rm_purchase_statement
 from core.services.signals_billing import propagate_carry_forward
 from core.utils_money import to_rupees_int
 from core.utils_weight import D, dkg
@@ -533,11 +534,12 @@ class RawMaterialTxnAdmin(admin.ModelAdmin):
     autocomplete_fields = ("from_customer","to_customer")
     inlines = (PurchasePaymentInline,)
 
+    
     # Keep your server-side safety (apply() calculates and writes ledger)
     def save_model(self, request, obj, form, change):
         obj.apply(user=request.user)
         form.save_m2m()
-
+    
     @admin.display(description="Rate Per (KG)")
     def rate_display(self, obj):
         return money_int_pk(obj.rate_pkr)    
@@ -552,7 +554,70 @@ class RawMaterialTxnAdmin(admin.ModelAdmin):
             return "—"
         # uses the property we added: amount_pkr - linked supplier payments (never negative)
         return money_int_pk(obj.amount_pkr)
-        
+    
+    # 1) Add the readonly field only for PURCHASE rows
+    def get_readonly_fields(self, request, obj=None):
+        ro = list(super().get_readonly_fields(request, obj))
+        if obj and obj.kind == RawMaterialTxn.Kind.PURCHASE:
+            ro.append("purchase_pdf_actions")
+        return ro
+
+    # # 2) Inject an extra fieldset only for PURCHASE rows
+    # def get_fieldsets(self, request, obj=None):
+    #     fs = list(super().get_fieldsets(request, obj))
+    #     if obj and obj.kind == RawMaterialTxn.Kind.PURCHASE:
+    #         fs.append(("Purchase Statement", {"fields": ("purchase_pdf_actions",)}))
+    #     return fs
+
+    # 3) Render the two buttons
+    @admin.display(description="Purchase PDF")
+    def purchase_pdf_actions(self, obj):
+        if not obj or obj.kind != RawMaterialTxn.Kind.PURCHASE:
+            return "—"
+        prev = reverse("admin:core_rawmaterialtxn_preview_pdf", args=[obj.pk])
+        down = reverse("admin:core_rawmaterialtxn_download_pdf", args=[obj.pk])
+        return format_html(
+            '<a class="button" target="_blank" href="{}">Preview PDF</a>&nbsp;'
+            '<a class="button" href="{}">Download PDF</a>',
+            prev, down
+        )
+
+    # 4) Admin URLs for the views
+    def get_urls(self):
+        urls = super().get_urls()
+        my = [
+            path(
+                "<int:pk>/preview-purchase/",
+                self.admin_site.admin_view(self.preview_purchase_pdf),
+                name="core_rawmaterialtxn_preview_pdf",
+            ),
+            path(
+                "<int:pk>/download-purchase/",
+                self.admin_site.admin_view(self.download_purchase_pdf),
+                name="core_rawmaterialtxn_download_pdf",
+            ),
+        ]
+        return my + urls
+
+    # 5) Views that build/serve the PDF
+    def preview_purchase_pdf(self, request, pk):
+        try:
+            path = generate_rm_purchase_statement(pk, user=request.user)
+        except Exception as e:
+            return HttpResponseBadRequest(str(e))
+        fname = Path(path).name
+        resp = FileResponse(open(path, "rb"), content_type="application/pdf")
+        resp["Content-Disposition"] = f'inline; filename="{fname}"'
+        return resp
+
+    def download_purchase_pdf(self, request, pk):
+        try:
+            path = generate_rm_purchase_statement(pk, user=request.user)
+        except Exception as e:
+            return HttpResponseBadRequest(str(e))
+        return FileResponse(open(path, "rb"), as_attachment=True,
+                           filename=Path(path).name, content_type="application/pdf")
+         
     class Media:
         # put the JS below at: core/static/core/admin/raw_material_txn.js
         js = ("core/admin/raw_material_txn.js",)
@@ -945,161 +1010,3 @@ class SalaryPaymentAdmin(admin.ModelAdmin):
     list_filter = ('period_year', 'period_month', 'method', 'employee')
     search_fields = ('employee__name',)
     date_hierarchy = 'payment_date'
-    
-
-
-
-# # ----- Inline (read-only) lines on a statement -----
-# class StatementLineInline(admin.TabularInline):
-#     model = StatementLine
-#     extra = 0
-#     fields = ("date","line_type","description","order","payment","qty_kg","rate","amount_pkr")
-#     readonly_fields = fields
-#     can_delete = False
-#     def has_add_permission(self, request, obj=None): return False
-
-# def _sum_qs(qs):
-#     val = qs.aggregate(total=Sum("amount_pkr"))["total"]
-#     return int(val or 0)
-
-# @admin.register(MonthlyStatement)
-# class MonthlyStatementAdmin(admin.ModelAdmin):
-#     list_display  = ("customer","period","opening_live","charges_live","credits_live","closing_live","opening_mode","closing_override_enabled","frozen")
-#     list_filter   = ("year","month","opening_mode","closing_override_enabled","frozen")
-#     search_fields = ("customer__company_name",)
-
-#     fieldsets = (
-#         ("Statement Period", {"fields": ("customer","year","month","generated_at","frozen")}),
-#         ("Carry-forward / Opening", {
-#             "fields": ("opening_mode","opening_manual_pkr","opening_live"),
-#             "description": "AUTO = previous month closing (or OPENING lines / customer's carry-forward). MANUAL uses the value below."
-#         }),
-#         ("Totals (live, read-only)", {
-#             "fields": ("charges_live","credits_live","closing_live"),
-#         }),
-#         ("Reconciliation", {                     # <-- this renders the box
-#             "fields": ("reconciliation",),
-#         }),
-#         ("Closing Override (optional)", {
-#             "fields": ("closing_override_enabled","closing_override_pkr"),
-#             "description": "Enable to force a specific closing; we add one ADJ line to reach it."
-#         }),
-#         ("Credits allocation (informational)", {"fields": ("credits_breakdown",)}),
-#     )
-
-#     # include the computed field in readonly_fields so Admin allows it in fieldsets
-#     readonly_fields = ("opening_live","charges_live","credits_live","closing_live","reconciliation","close_and_carry_forward", "unfreeze_statements","credits_breakdown","generated_at")
-
-#     actions = ["action_recompute_and_persist","freeze_statements","unfreeze_statements"]
-
-
-#     @admin.display(description="Credits breakdown (this month)")
-#     def credits_breakdown(self, obj):
-#         b = obj.credits_breakdown_pkr()
-#         html = f"""
-#         <table class="grp-table">
-#         <tr><th>Cash received</th><td style="text-align:right">{b['cash_total']:,}</td></tr>
-#         <tr><th>Applied to prior months</th><td style="text-align:right">− {b['applied_prior']:,}</td></tr>
-#         <tr><th>Applied to this month</th><td style="text-align:right">− {b['applied_current']:,}</td></tr>
-#         <tr><th>Applied to future</th><td style="text-align:right">− {b['applied_future']:,}</td></tr>
-#         <tr><th>Unapplied (on account)</th><td style="text-align:right">= {b['unapplied']:,}</td></tr>
-#         <tr><th>Rounding total</th><td style="text-align:right">{b['rounding_delta']:,}</td></tr>
-#         </table>
-#         """
-#         return mark_safe(html)
-
-
-#     @admin.action(description="Close month & carry forward closing to customer")
-#     def close_and_carry_forward(self, request, queryset):
-#         n = 0
-#         for st in queryset:
-#             if st.frozen:
-#                 # already closed; still refresh and re-carry in case numbers changed
-#                 st.recompute(save=True)
-#             else:
-#                 st.frozen = True
-#                 st.recompute(save=True)
-#                 st.save(update_fields=["frozen"])
-#             propagate_carry_forward(st)
-#             n += 1
-#         messages.success(request, f"Closed & carried forward {n} statement(s).")
-    
-#     @admin.action(description="Unfreeze selected")
-#     def unfreeze_statements(self, request, queryset):
-#         updated = queryset.update(frozen=False)
-#         messages.success(request, f"Unfrozen {updated} statement(s).")
-
-    
-
-#     def period(self, obj):  # list_display helper
-#         return f"{obj.year}-{obj.month:02d}"
-
-#     # ---------- LIVE totals (computed on the fly) ----------
-#     def opening_live(self, obj):
-#         return obj._compute_opening()
-
-#     def charges_live(self, obj):
-#         qs = obj.lines.filter(line_type__in=["ORDER","RAW_IN","ADJ"])
-#         if not obj.closing_override_enabled:
-#             qs = qs.exclude(description=CLOSING_OVERRIDE_DESC)
-#         return _sum_qs(qs)
-
-#     def credits_live(self, obj):
-#         return abs(_sum_qs(obj.lines.filter(line_type="PAY")))
-
-#     def closing_live(self, obj):
-#         return int(self.opening_live(obj)) + int(self.charges_live(obj)) - int(self.credits_live(obj))
-
-#     # ---------- Reconciliation box (this is what was missing) ----------
-#     @admin.display(description="Reconciliation (this month)")
-#     def reconciliation(self, obj):
-#         order_rows = obj.lines.filter(line_type="ORDER") \
-#                               .values_list("order__invoice_number","amount_pkr") \
-#                               .order_by("id")
-
-#         o_total = _sum_qs(obj.lines.filter(line_type="ORDER"))
-#         r_total = _sum_qs(obj.lines.filter(line_type="RAW_IN"))
-#         a_total = _sum_qs(obj.lines.filter(line_type="ADJ").exclude(description=CLOSING_OVERRIDE_DESC))
-#         p_total = abs(_sum_qs(obj.lines.filter(line_type="PAY")))
-
-#         rows_html = "".join(
-#             f"<tr><td>{inv or ''}</td><td style='text-align:right'>{int(amt or 0):,}</td></tr>"
-#             for inv, amt in order_rows
-#         )
-
-#         html = f"""
-#         <table class="grp-table">
-#           <tr><th>Invoice</th><th style='text-align:right'>Amount</th></tr>
-#           {rows_html}
-#           <tr><td><b>ORDER total</b></td><td style='text-align:right'><b>{o_total:,}</b></td></tr>
-#           <tr><td><b>RAW_IN total</b></td><td style='text-align:right'><b>{r_total:,}</b></td></tr>
-#           <tr><td><b>ADJ total</b></td><td style='text-align:right'><b>{a_total:,}</b></td></tr>
-#           <tr><td><b>PAY (credits)</b></td><td style='text-align:right'><b>{p_total:,}</b></td></tr>
-#         </table>
-#         """
-#         return mark_safe(html)
-
-#     # ---------- Persist stored totals, so exports/PDFs match live ----------
-#     @admin.action(description="Recompute & persist totals")
-#     def action_recompute_and_persist(self, request, queryset):
-#         n = 0
-#         for st in queryset:
-#             st.recompute(save=True)
-#             n += 1
-#         messages.success(request, f"Recomputed {n} statement(s).")
-
-#     @admin.action(description="Freeze selected")
-#     def freeze_statements(self, request, queryset):
-#         messages.success(request, f"Frozen {queryset.update(frozen=True)} statement(s).")
-
-#     @admin.action(description="Unfreeze selected")
-#     def unfreeze_statements(self, request, queryset):
-#         messages.success(request, f"Unfrozen {queryset.update(frozen=False)} statement(s).")
-
-#     def save_model(self, request, obj, form, change):
-#         # keep stored totals aligned whenever you toggle fields in admin
-#         super().save_model(request, obj, form, change)
-#         obj.recompute(save=True)
-#         # If user checked 'frozen' and saved, carry forward immediately
-#         if "frozen" in form.changed_data and obj.frozen:
-#             propagate_carry_forward(obj)
