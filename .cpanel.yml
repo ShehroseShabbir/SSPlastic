@@ -15,6 +15,7 @@ deployment:
 
     # ---- choose target based on repo path ----
     - |
+    
       case "$PWD" in
         */repositories/backoffice-dev)
           TARGET="$DEV_APP_ROOT"; VENV="$DEV_VENV"; ENV_NAME="dev"
@@ -28,7 +29,7 @@ deployment:
           ;;
       esac
       echo "TARGET=$TARGET"; echo "VENV=$VENV"; echo "ENV=$ENV_NAME"
-
+    - 'umask 022'
     # ---- prepare target; KEEP important files ----
     - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles" "$TARGET/tmp"'
     - 'echo "Cleaning TARGET (preserving media/staticfiles/tmp/.env*/passenger_wsgi.py/.htaccess)..."'
@@ -43,7 +44,7 @@ deployment:
         ! -name "passenger_wsgi.py" \
         ! -name ".htaccess" \
         -exec rm -rf {} +
-
+    - 'umask 022'
     # ---- copy repo -> TARGET via tar ----
     - 'echo "Copying repo into TARGET..."'
     - |
@@ -91,7 +92,8 @@ deployment:
       fi
   
     # ---- restart Passenger ----
+    - 'chmod 0755 "$TARGET" || true'
     - 'touch "$TARGET/tmp/restart.txt"'
 
-    - 'chmod 0755 "$TARGET" || true'
+   
     - 'echo "===== deploy finished ====="'
