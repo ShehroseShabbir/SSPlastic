@@ -2,6 +2,7 @@
 from django.contrib.admin import AdminSite
 
 class SSPAdminSite(AdminSite):
+    login_template = "registration/login.html"
     site_header = "SS Plastic Admin"
     site_title  = "SS Plastic"
     index_title = "Back Office"

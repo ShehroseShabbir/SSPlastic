@@ -56,6 +56,13 @@ ALLOWED_HOSTS = (
     else []
 )
 
+# -----------------------------------
+# Authentication
+# -----------------------------------
+LOGIN_URL = '/admin/login/'
+LOGIN_REDIRECT_URL = '/'      # where to go after successful login
+LOGOUT_REDIRECT_URL = '/admin/login/'
+
 # If you set this in env (comma-separated full URLs), Django will trust those for CSRF
 # e.g. "https://my.backoffice.kamranenterprises.pk,https://dev.backoffice.kamranenterprises.pk"
 CSRF_TRUSTED_ORIGINS = [

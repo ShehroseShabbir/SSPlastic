@@ -1,5 +1,6 @@
 from django.shortcuts import render, get_object_or_404
 from django.http import HttpResponse
+from django.contrib.auth.decorators import login_required
 from collections import defaultdict
 from decimal import Decimal
 from .models import (
@@ -101,7 +102,7 @@ def customer_balances(request):
 
     return render(request, 'core/customer_balances.html', {'rows': rows})
 
-
+@login_required(login_url='/admin/login/')
 def dashboard(request):
     today = timezone.now().date()
 

@@ -1,0 +1,148 @@
+{% load static %}
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sign in · Kamran Enterprises</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{
+      --bg: #0f172a;          /* slate-900 */
+      --card: #111827;        /* gray-900 */
+      --muted: #94a3b8;       /* slate-400 */
+      --text: #e5e7eb;        /* gray-200 */
+      --primary: #22d3ee;     /* cyan-400 */
+      --primary-700:#0e7490;  /* cyan-700 */
+      --ring: rgba(34,211,238,.35);
+      --error:#ef4444;
+      --ok:#10b981;
+    }
+    @media (prefers-color-scheme: light) {
+      :root{
+        --bg: #f1f5f9;
+        --card:#ffffff;
+        --muted:#64748b;
+        --text:#0f172a;
+        --primary:#0891b2;
+        --primary-700:#155e75;
+        --ring: rgba(8,145,178,.25);
+        --error:#b91c1c;
+        --ok:#047857;
+      }
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; background:
+        radial-gradient(60vmax 60vmax at 10% 10%, rgba(34,211,238,.06), transparent),
+        radial-gradient(60vmax 60vmax at 100% 0%, rgba(59,130,246,.06), transparent),
+        radial-gradient(60vmax 60vmax at 50% 100%, rgba(34,197,94,.06), transparent),
+        var(--bg);
+      color:var(--text); font:16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
+      display:grid; place-items:center; padding:24px;
+    }
+    .wrap{width:100%; max-width:440px}
+    .card{
+      background:var(--card); border:1px solid rgba(148,163,184,.15);
+      border-radius:20px; padding:28px; box-shadow: 0 20px 40px rgba(0,0,0,.25);
+      backdrop-filter: blur(6px);
+    }
+    .brand{
+      display:flex; align-items:center; gap:12px; margin-bottom:18px;
+    }
+    .logo{
+      width:44px; height:44px; border-radius:12px;
+      background: linear-gradient(135deg, var(--primary), #60a5fa);
+      display:grid; place-items:center; color:#000; font-weight:800;
+      box-shadow: 0 8px 24px rgba(34,211,238,.35);
+    }
+    h1{margin:0; font-size:1.35rem; letter-spacing:.2px}
+    p.sub{margin:4px 0 0; color:var(--muted); font-size:.95rem}
+    form{margin-top:16px}
+    .field{margin-bottom:14px}
+    label{display:block; font-weight:600; margin-bottom:6px; color:var(--muted)}
+    input[type="text"], input[type="password"]{
+      width:100%; padding:12px 14px; border-radius:12px; border:1px solid rgba(148,163,184,.25);
+      background:transparent; color:var(--text); outline:none;
+      transition:.2s border-color, .2s box-shadow, .2s transform;
+    }
+    input:focus{
+      border-color:var(--primary);
+      box-shadow: 0 0 0 6px var(--ring);
+      transform: translateY(-1px);
+    }
+    .actions{
+      display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:6px;
+    }
+    .btn{
+      display:inline-flex; align-items:center; justify-content:center; gap:8px;
+      border:none; cursor:pointer; padding:12px 16px; border-radius:12px; font-weight:700;
+      background:linear-gradient(135deg, var(--primary), #60a5fa); color:#0b1220;
+      box-shadow: 0 8px 24px rgba(34,211,238,.35); transition: transform .12s ease, filter .2s ease;
+    }
+    .btn:hover{ transform: translateY(-1px); filter:brightness(1.05) }
+    .link{color:var(--primary); text-decoration:none; font-weight:600}
+    .link:hover{text-decoration:underline}
+    .footer{
+      margin-top:14px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:.92rem
+    }
+    .alert{
+      margin:8px 0 14px; padding:10px 12px; border-radius:12px; border:1px solid rgba(239,68,68,.35);
+      background: rgba(239,68,68,.10); color:var(--error); font-weight:600
+    }
+    .help{margin-top:10px; color:var(--muted); font-size:.9rem}
+    .sr-only{position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="brand">
+        <div class="logo">SS</div>
+        <div>
+          <h1>Sign in</h1>
+          <p class="sub">Access your dashboard</p>
+        </div>
+      </div>
+
+      {% if form.errors %}
+        <div class="alert">Invalid username or password.</div>
+      {% endif %}
+
+      {% if next and user.is_authenticated %}
+        <div class="alert">You don’t have permission to view that page.</div>
+      {% endif %}
+
+      <form method="post" action="{% url 'login' %}">
+        {% csrf_token %}
+        <div class="field">
+          <label for="id_username">Username</label>
+          {{ form.username }}
+        </div>
+        <div class="field">
+          <label for="id_password">Password</label>
+          {{ form.password }}
+        </div>
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="actions">
+          <a class="link" href="{% url 'password_reset' %}">Forgot password?</a>
+          <button class="btn" type="submit">Sign in</button>
+        </div>
+      </form>
+
+      <p class="help">Tip: Superusers can also access <a class="link" href="/admin/">Admin</a>.</p>
+    </div>
+  </div>
+
+  <!-- Small helper to remove Django's default widgets' inline styles (optional) -->
+  <script>
+    // Remove Django admin-style classes if present on fields
+    for (const el of document.querySelectorAll('input')) {
+      el.className = '';
+      el.placeholder = el.type === 'password' ? '••••••••' : '';
+      el.autocomplete = el.type === 'password' ? 'current-password' : 'username';
+    }
+  </script>
+</body>
+</html>
