@@ -29,7 +29,10 @@ deployment:
           ;;
       esac
       echo "TARGET=$TARGET"; echo "VENV=$VENV"; echo "ENV=$ENV_NAME"
+
+    # Optional: sane default perms for any mkdirs this script does
     - 'umask 022'
+
     # ---- prepare target; KEEP important files ----
     - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles" "$TARGET/tmp"'
     - 'echo "Cleaning TARGET (preserving media/staticfiles/tmp/.env*/passenger_wsgi.py/.htaccess)..."'
@@ -44,7 +47,7 @@ deployment:
         ! -name "passenger_wsgi.py" \
         ! -name ".htaccess" \
         -exec rm -rf {} +
-    - 'umask 022'
+    
     # ---- copy repo -> TARGET via tar ----
     - 'echo "Copying repo into TARGET..."'
     - |
@@ -52,6 +55,9 @@ deployment:
           --exclude='__pycache__' --exclude='node_modules' \
           --exclude='staticfiles' --exclude='media' \
           -cf - . | (cd "$TARGET" && tar -xf -)
+    # >>> ensure the deployment root is 0755 after files land (USE DOUBLE QUOTES)
+    - "chmod 0755 \"$TARGET\" || true"
+    - "ls -ld \"$TARGET\""
 
     # ---- ensure passenger_wsgi.py exists ----
     - |
@@ -71,7 +77,6 @@ deployment:
     - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
 
      # ---- fix permissions ----
-    - 'chmod 755 "$TARGET" || true'
     - 'chmod 755 "$TARGET/.htaccess" || true'
     - 'chmod -R u+rwX,go+rX "$TARGET/logs" "$TARGET/tmp" || true'
     
@@ -91,9 +96,10 @@ deployment:
         python manage.py check --deploy || true
       fi
   
-    # ---- restart Passenger ----
-    - 'chmod 0755 "$TARGET" || true'
-    - 'touch "$TARGET/tmp/restart.txt"'
+  # >>> FINAL safety: force root back to 0755 right before restart
+    - "chmod 0755 \"$TARGET\" || true"
+    - "ls -ld \"$TARGET\""
 
-   
+    # ---- restart Passenger ----
+    - 'touch "$TARGET/tmp/restart.txt"'
     - 'echo "===== deploy finished ====="'
