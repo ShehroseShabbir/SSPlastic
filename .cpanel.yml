@@ -70,7 +70,7 @@ deployment:
     - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
 
      # ---- fix permissions ----
-    - 'chmod 0755 "$TARGET" || true'
+    - 'chmod 755 "$TARGET" || true'
     - 'chmod 755 "$TARGET/.htaccess" || true'
     - 'chmod -R u+rwX,go+rX "$TARGET/logs" "$TARGET/tmp" || true'
     
