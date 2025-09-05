@@ -89,7 +89,9 @@ deployment:
         echo "Running production checks…"
         python manage.py check --deploy || true
       fi
-
+  
     # ---- restart Passenger ----
     - 'touch "$TARGET/tmp/restart.txt"'
+
+    - 'chmod 0755 "$TARGET" || true'
     - 'echo "===== deploy finished ====="'
