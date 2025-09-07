@@ -16,6 +16,7 @@
       box-shadow: 0 1px 0 rgba(0,0,0,.04);
       max-width: 100%;
       flex-wrap: wrap;
+      margin-top: -15px;
     }
     .statement-tools label {
       font-size: 12px;
@@ -81,8 +82,25 @@
 
 {% block object-tools-items %}
   {{ block.super }}
+    {% if raw_material_tools %}
+    <li>
+      <a class="button" href="{% url 'admin:core_customer_purchase_material' original.pk %}">
+        Purchase Raw Material
+      </a>
+    </li>
+    <li>
+      <a class="button" href="{% url 'admin:core_customer_sell_material' original.pk %}">
+        Sell Raw Material
+      </a>
+    </li>
+    <li>
+      <a class="button" href="{% url 'admin:core_customer_transfer_material' original.pk %}">
+        Transfer Raw Material
+      </a>
+    </li>
+  {% endif %}
   <li>
-    <form action="{{ statement_download_url }}" method="get" class="statement-tools">
+    <form action="" method="get" class="statement-tools" style="display:flex; gap:.5rem; align-items:center;">
       <label for="id-month">Month</label>
       <span class="select-wrap">
         <select id="id-month" name="month">
@@ -101,7 +119,25 @@
         </select>
       </span>
 
-      <button type="submit" class="button default">Download Monthly Statement</button>
+      {# Preview: opens new tab with selected month/year #}
+      <button type="submit"
+              class="button"
+              formaction="{{ statement_preview_url }}"
+              formtarget="_blank" rel="noopener">
+        Preview Statement
+      </button>
+
+      {# Download: downloads with selected month/year #}
+      <button type="submit"
+              class="button"
+              formaction="{{ statement_download_url }}">
+        Download Statement
+      </button>
     </form>
   </li>
+  
 {% endblock %}
+
+{# admin/core/customer/change_form.html (or extend the default and insert below object-tools) #}
+
+

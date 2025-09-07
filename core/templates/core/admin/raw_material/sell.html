@@ -1,0 +1,27 @@
+{% extends "admin/change_form.html" %}
+{% block content %}
+<div id="content" class="colM">
+  <h1>{{ title }}</h1>
+  <form method="post" novalidate>
+    {% csrf_token %}
+    <fieldset class="module aligned">
+      <div class="form-row">
+        <label for="id_qty_kg" class="required">Quantity (kg)</label>
+        <input type="number" step="0.001" min="0" name="qty_kg" id="id_qty_kg" required>
+      </div>
+      <div class="form-row">
+        <label for="id_unit_cost_pkr" class="required">Unit Cost (PKR/kg)</label>
+        <input type="number" step="1" min="0" name="unit_cost_pkr" id="id_unit_cost_pkr" required>
+      </div>
+      <div class="form-row">
+        <label for="id_notes">Notes</label>
+        <textarea name="notes" id="id_notes" rows="3"></textarea>
+      </div>
+    </fieldset>
+    <div class="submit-row">
+      <a class="button cancel-link" href="{% url 'admin:core_customer_change' original.pk %}">Cancel</a>
+      <input type="submit" value="Record Sale" class="default">
+    </div>
+  </form>
+</div>
+{% endblock %}

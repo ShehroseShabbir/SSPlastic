@@ -19,7 +19,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Folder to store generated invoices
 INVOICES_ROOT = BASE_DIR / "invoices"
 INVOICES_ROOT.mkdir(parents=True, exist_ok=True)  # auto-create on startup
-
+INVOICE_ROUNDING = {
+    "mode": "ceil",       # ceil | half_up | floor (ceil = always round up)
+    "quantum": "1",       # '1' rupee, or '10' to round up to next 10, etc.
+}
 # Path to logo (put the file in your project; e.g. core/static/core/Logo.png)
 INVOICE_LOGO_PATH = BASE_DIR / "core" / "static" / "core" / "Logo.png"
 
@@ -53,6 +56,13 @@ ALLOWED_HOSTS = (
     else []
 )
 
+# -----------------------------------
+# Authentication
+# -----------------------------------
+LOGIN_URL = '/admin/login/'
+LOGIN_REDIRECT_URL = '/'      # where to go after successful login
+LOGOUT_REDIRECT_URL = '/admin/login/'
+
 # If you set this in env (comma-separated full URLs), Django will trust those for CSRF
 # e.g. "https://my.backoffice.kamranenterprises.pk,https://dev.backoffice.kamranenterprises.pk"
 CSRF_TRUSTED_ORIGINS = [
@@ -69,6 +79,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    "django.contrib.humanize",
+    'django_countries',
     'rest_framework',
     'core.apps.CoreConfig',
 ]
@@ -166,7 +178,7 @@ USE_TZ = True
 # Static & media
 # -----------------------------------
 STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'     # for collectstatic
+#STATIC_ROOT = BASE_DIR / 'staticfiles'     # for collectstatic
 
 # WhiteNoise compressed manifest storage (great for cPanel)
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'

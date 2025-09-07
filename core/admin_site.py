@@ -2,6 +2,7 @@
 from django.contrib.admin import AdminSite
 
 class SSPAdminSite(AdminSite):
+    login_template = "registration/login.html"
     site_header = "SS Plastic Admin"
     site_title  = "SS Plastic"
     index_title = "Back Office"
@@ -32,11 +33,18 @@ class SSPAdminSite(AdminSite):
             return next((m for m in core_models if m["name"] == name), None)
 
         buckets = [
-            ("Accounting",    [pick("Payments"), pick("Expenses"), pick("Payment allocations"), pick("Material receipts"), pick("Customer material ledgers")]),
+            ("Accounting", [
+                pick("Receive Payments"),
+                pick("Material Receipts"),
+                pick("Payments Ledger"),
+                pick("Ledgers"),
+                pick("Raw Material Transactions"),
+                pick("Expenses"),
+            ]),
             ("Production",    [pick("Customers"), pick("Orders")]),
             ("HR",            [pick("Employees"), pick("Attendances"), pick("Salary payments")]),
             ("Configuration", [pick("Site Settings"), pick("Expense Categories")]),
-        ]
+]
 
         grouped = []
         for title, models in buckets:

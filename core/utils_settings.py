@@ -1,7 +1,8 @@
 # core/admin.py
 from django.core.cache import cache
 from django.contrib import admin
-from .models import SiteSettings  # keep your other imports
+
+from core.models.settings import SiteSettings
 
 def _splitlines(val):
     if not val:
@@ -41,7 +42,7 @@ class SiteSettingsAdmin(admin.ModelAdmin):
             "fields": ("tax_label", "tax_rate")
         }),
         ("Banking (PDF footer)", {
-            "fields": ("bank_details",)
+            "fields": ("notes","bank_details",)
         }),
         ("Email (optional overrides)", {
             "description": "Leave blank to use project settings.py EMAIL_* values.",

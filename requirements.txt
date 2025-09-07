@@ -1,6 +1,20 @@
-Flask
-Flask-SQLAlchemy
-Flask-WTF
-email-validator
-reportlab
-Flask-Mail
+# Django core
+Django==5.2.5
+
+# Django REST framework
+djangorestframework==3.15.2
+
+# MySQL pure-Python driver (safe for cPanel, no compilation needed)
+PyMySQL==1.1.1
+
+# Env var support
+python-dotenv==1.0.1
+
+# Static files handling (for cPanel deployment)
+whitenoise==6.7.0
+
+# Email address validation
+email-validator==2.2.0
+
+# Optional (PDF generation if you’re generating invoices)
+reportlab==4.2.5

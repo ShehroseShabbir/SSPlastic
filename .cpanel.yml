@@ -1,69 +1,105 @@
 deployment:
   tasks:
-    - 'set -e'
-
-    # ----- Meta -----
+    - 'set -euo pipefail'
     - 'echo "===== cPanel deploy: $(date) ====="'
-    - 'echo "Repo: $PWD"'
-    - 'BRANCH=$(git rev-parse --abbrev-ref HEAD)'
-    - 'COMMIT=$(git rev-parse --short HEAD)'
-    - 'echo "Branch=$BRANCH  Commit=$COMMIT"'
+    - 'echo "PWD: $PWD"; echo "USER: $(whoami)"'
+    - 'BRANCH=$(git rev-parse --abbrev-ref HEAD || true)'
+    - 'echo "BRANCH=$BRANCH"'
 
-    # ----- Paths (check once) -----
-    - 'DEV_APP_ROOT=/home/kamranen/dev.backoffice'
-    - 'PROD_APP_ROOT=/home/kamranen/backoffice'
+    # ---- paths & python version ----
     - 'PYVER=3.10'
+    - 'DEV_APP_ROOT=/home/kamranen/backoffice_dev'
+    - 'PROD_APP_ROOT=/home/kamranen/backoffice'
+    - 'DEV_VENV=/home/kamranen/virtualenv/backoffice_dev/$PYVER/bin/activate'
+    - 'PROD_VENV=/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate'
 
-    # Decide target by branch
+    # ---- choose target based on repo path ----
     - |
-      if [ "$BRANCH" = "develop" ] || [ "$BRANCH" = "dev" ]; then
-        TARGET="$DEV_APP_ROOT"
-        VENV="/home/kamranen/virtualenv/dev.backoffice/$PYVER/bin/activate"
-        ENV_NAME="dev"
-      elif [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
-        TARGET="$PROD_APP_ROOT"
-        VENV="/home/kamranen/virtualenv/backoffice/$PYVER/bin/activate"
-        ENV_NAME="prod"
-      else
-        echo "Branch '$BRANCH' not configured for deployment. Skipping."
-        exit 0
+    
+      case "$PWD" in
+        */repositories/backoffice-dev)
+          TARGET="$DEV_APP_ROOT"; VENV="$DEV_VENV"; ENV_NAME="dev"
+          ;;
+        */repositories/backoffice-prod)
+          TARGET="$PROD_APP_ROOT"; VENV="$PROD_VENV"; ENV_NAME="prod"
+          ;;
+        *)
+          echo "Unknown repo path ($PWD). Expected backoffice-dev or backoffice-prod." >&2
+          exit 1
+          ;;
+      esac
+      echo "TARGET=$TARGET"; echo "VENV=$VENV"; echo "ENV=$ENV_NAME"
+
+    # Optional: sane default perms for any mkdirs this script does
+    - 'umask 022'
+
+    # ---- prepare target; KEEP important files ----
+    - 'mkdir -p "$TARGET" "$TARGET/media" "$TARGET/staticfiles" "$TARGET/tmp"'
+    - 'echo "Cleaning TARGET (preserving media/staticfiles/tmp/.env*/passenger_wsgi.py/.htaccess)..."'
+    - |
+      find "$TARGET" -mindepth 1 -maxdepth 1 \
+        ! -name media \
+        ! -name staticfiles \
+        ! -name tmp \
+        ! -name ".env" \
+        ! -name ".env.dev" \
+        ! -name ".env.prod" \
+        ! -name "passenger_wsgi.py" \
+        ! -name ".htaccess" \
+        -exec rm -rf {} +
+    
+    # ---- copy repo -> TARGET via tar ----
+    - 'echo "Copying repo into TARGET..."'
+    - |
+      tar --exclude='.git' --exclude='.github' --exclude='.cpanel.yml' \
+          --exclude='__pycache__' --exclude='node_modules' \
+          --exclude='staticfiles' --exclude='media' \
+          -cf - . | (cd "$TARGET" && tar -xf -)
+    # >>> ensure the deployment root is 0755 after files land (USE DOUBLE QUOTES)
+    - "chmod 0755 \"$TARGET\" || true"
+    - "ls -ld \"$TARGET\""
+
+    # ---- ensure passenger_wsgi.py exists ----
+    - |
+      if [ ! -f "$TARGET/passenger_wsgi.py" ]; then
+        echo "passenger_wsgi.py missing; creating a default one..."
+        cat > "$TARGET/passenger_wsgi.py" <<'PYWSGI'
+        import os, sys, pathlib
+        BASE_DIR = pathlib.Path(__file__).resolve().parent
+        sys.path.insert(0, str(BASE_DIR))
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", os.getenv("DJANGO_SETTINGS_MODULE", "polyroll_mgmt.settings"))
+        from django.core.wsgi import get_wsgi_application
+        application = get_wsgi_application()
+        PYWSGI
       fi
-      echo "Deploying to $TARGET (env=$ENV_NAME)"
 
-    # Ensure target exists (cPanel should have created it)
-    - 'mkdir -p "$TARGET"'
-
-    # Rsync repo → app root (keep media/staticfiles generated on server)
-    - |
-      /bin/rsync -a --delete \
-        --exclude ".git" \
-        --exclude ".github" \
-        --exclude ".cpanel.yml" \
-        --exclude "__pycache__" \
-        --exclude "node_modules" \
-        --exclude "staticfiles" \
-        --exclude "media" \
-        ./ "$TARGET/"
-
-    # Optional: switch .env symlink per env if present on server
+    # ---- switch env file (.env.dev/.env.prod) ----
     - '[ -f "$TARGET/.env.$ENV_NAME" ] && ln -sf "$TARGET/.env.$ENV_NAME" "$TARGET/.env" || true'
 
-    # Activate the correct cPanel virtualenv and install deps
+     # ---- fix permissions ----
+    - 'chmod 755 "$TARGET/.htaccess" || true'
+    - 'chmod -R u+rwX,go+rX "$TARGET/logs" "$TARGET/tmp" || true'
+    
+    # ---- install dependencies into cPanel venv ----
+    - 'echo "Installing requirements into venv..."'
     - 'source "$VENV"'
     - 'python -m pip install --upgrade pip wheel setuptools'
-    - '[ -f "$TARGET/requirements.txt" ] && pip install -r "$TARGET/requirements.txt" || true'
+    - 'if [ -f "$TARGET/requirements.txt" ]; then pip install -r "$TARGET/requirements.txt"; fi'
 
-    # Django maintenance
+    # ---- Django housekeeping ----
     - 'cd "$TARGET"'
-    - 'python manage.py migrate --noinput'
-    - 'python manage.py collectstatic --noinput'
+    - 'python manage.py migrate --noinput || true'
+    - 'python manage.py collectstatic --noinput || true'
     - |
       if [ "$ENV_NAME" = "prod" ]; then
         echo "Running production checks…"
         python manage.py check --deploy || true
       fi
+  
+  # >>> FINAL safety: force root back to 0755 right before restart
+    - "chmod 0755 \"$TARGET\" || true"
+    - "ls -ld \"$TARGET\""
 
-    # Restart Passenger
-    - 'mkdir -p "$TARGET/tmp"'
+    # ---- restart Passenger ----
     - 'touch "$TARGET/tmp/restart.txt"'
-    - 'echo "===== deploy finished: $BRANCH → $TARGET ====="'
+    - 'echo "===== deploy finished ====="'
