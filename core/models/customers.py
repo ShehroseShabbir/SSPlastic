@@ -6,7 +6,6 @@ from django.db.models import Sum, Q
 from django.conf import settings
 from core.models.common import money_int_pk
 from core.utils_money import to_rupees_int
-from django_countries.fields import CountryField
 
 # You already have FINAL_STATES in models_ar
 from ..models_ar import FINAL_STATES
