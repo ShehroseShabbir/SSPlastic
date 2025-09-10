@@ -340,16 +340,23 @@ class CustomerAdmin(admin.ModelAdmin):
             ),
         ]
         return my_urls + urls
+    
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.annotate(
+            # Σ ledger deltas (IN − OUT) per customer
+            mat_balance_calc=Coalesce(
+                Sum("material_ledger__delta_kg", output_field=KG),
+                Value(Decimal("0.000"), output_field=KG),
+            )
+        )
 
-    # ----- Displays (read-only) -----
+
     @admin.display(description="Material Balance (kg)")
     def material_balance_display(self, obj):
-        # Net IN − OUT (3dp)
-        agg = obj.material_ledger.aggregate(
-            s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
-        )
-        bal = agg["s"] or Decimal("0.000")
-        return f"{bal:,.3f}"
+        val = getattr(obj, "mat_balance_calc", Decimal("0.000")) or Decimal("0.000")
+        return f"{val.quantize(Decimal('0.001')):,.3f}"
+
 
     @admin.display(description="Total IN (Lifetime kg)")
     def lifetime_in_display(self, obj):
@@ -357,28 +364,21 @@ class CustomerAdmin(admin.ModelAdmin):
             s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
         )
         val = agg["s"] or Decimal("0.000")
-        return f"{val:,.3f}"
-    
+        return f"{val.quantize(Decimal('0.001')):,.3f}"
+
     @admin.display(description="Carry-Forward (PKR)")
     def carry_forward_display(self, obj):
-        # Shows 0 once payments ≥ initial carry
+        from core.models.common import money_int_pk
         return money_int_pk(obj.carry_remaining_pkr)
 
     @admin.display(description="Pending / Credit (PKR)")
     def pending_display(self, obj):
-        # prefer stored field; fallback to live compute
-        val = getattr(obj, "pending_balance_pkr", None)
-        if val is None:
-            val = obj.pending_balance_live_pkr
+        val = getattr(obj, "pending_balance_pkr", None) or obj.pending_balance_live_pkr
         try:
             n = int(val or 0)
         except (TypeError, ValueError):
             n = 0
-
-        if n >= 0:
-            return f"PKR {n:,}"
-        # overpaid → show positive with credit label
-        return f"PKR {abs(n):,} (credit)"
+        return f"PKR {n:,}" if n >= 0 else f"PKR {abs(n):,} (credit)"
 
     # ----- Statement preview/download helpers -----
     def _parse_period(self, request):

@@ -10,7 +10,7 @@ from reportlab.lib import colors
 from reportlab.lib.units import mm
 from datetime import date, datetime, timedelta
 from calendar import monthrange
-from django.db.models import Sum, Value, DecimalField
+from django.db.models import Sum, Value, DecimalField, F, ExpressionWrapper
 from django.db.models.functions import Coalesce
 from .utils_weight import dkg  # your Decimal quantizer
 # Models
@@ -302,81 +302,74 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
             pkr_str(amt),                  # Money -> PKR
         ])
     rows_payments.append(["", "", "Total", pkr_str(payments_total)])
-    # --- Material received in the month ---
-   # --- Material received in the month ---
-    receipts_qs = (
-        CustomerMaterialLedger.objects
-        .filter(customer=customer, date__range=(period_start, period_end), delta_kg__gt=0)
-        .order_by("date", "id")
-    )
-
-    rows_receipts: list[list[str]] = []
+# --- Material Received (Month) — LEDGER IN ONLY ---
+    rows_receipts = []
     receipts_total = Decimal("0.000")
 
-    for rec in receipts_qs:
+    ledger_entries = (
+    CustomerMaterialLedger.objects
+    .filter(customer=customer, date__range=(period_start, period_end))
+    .order_by("date", "id")
+)
+
+    rows_receipts = []
+    receipts_total = Decimal("0.000")
+
+    for rec in ledger_entries:
         qty = dkg(Decimal(rec.delta_kg or 0))
-        receipts_total += qty
         rows_receipts.append([
-            rec.date.date().isoformat(),    # strip time
+            rec.date.date().isoformat(),
             str(rec.memo or "—"),
             f"{qty:,.3f}",
         ])
+        receipts_total += qty
 
-    # Fallback if there were no IN ledger rows in the month
-    if not rows_receipts:
-        mr_qs = (
-            MaterialReceipt.objects
-            .filter(customer=customer, date__range=(first, last))
-            .order_by("date", "id")
-        )
-        for mr in mr_qs:
-            qty = dkg(Decimal(getattr(mr, "total_kg", 0) or 0))
-            receipts_total += qty
-            rows_receipts.append([
-                mr.date.isoformat(),
-                str(mr.notes or "—"),
-                f"{qty:,.3f}",
-            ])
-
-    rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
+    rows_receipts = rows_receipts or [["—", "—", "—"]]
+    if rows_receipts and rows_receipts[0][0] != "—":
+        rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
 
     closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) - int(payments_period_pkr)
 
     # ===========================
-    # 4) MATERIAL BALANCE SUMMARY (DateTimeField) -> use period_start/period_end
+    # MATERIAL BALANCE SUMMARY — LEDGER ONLY
+    # Closing = Opening + IN − OUT
     # ===========================
-    KG = DecimalField(max_digits=12, decimal_places=3)
+    KG  = DecimalField(max_digits=12, decimal_places=3)
+    kg0 = Decimal("0.000")
 
+    # Opening = Σ(ledger before this month)
     opening_kg = (
         CustomerMaterialLedger.objects
         .filter(customer=customer, date__lt=period_start)
-        .aggregate(b=Coalesce(Sum("delta_kg"), Value(Decimal("0"), output_field=KG)))
-        .get("b") or Decimal("0")
+        .aggregate(v=Coalesce(Sum("delta_kg", output_field=KG), Value(kg0, output_field=KG)))
+        ["v"] or kg0
     )
 
+    # This month IN (positive deltas)
     in_month_in_kg = (
         CustomerMaterialLedger.objects
         .filter(customer=customer, date__range=(period_start, period_end), delta_kg__gt=0)
-        .aggregate(s=Coalesce(Sum("delta_kg"), Value(Decimal("0"), output_field=KG)))
-        .get("s") or Decimal("0")
+        .aggregate(v=Coalesce(Sum("delta_kg", output_field=KG), Value(kg0, output_field=KG)))
+        ["v"] or kg0
     )
 
+    # This month OUT (sum is negative → display positive)
     in_month_out_neg = (
         CustomerMaterialLedger.objects
         .filter(customer=customer, date__range=(period_start, period_end), delta_kg__lt=0)
-        .aggregate(s=Coalesce(Sum("delta_kg"), Value(Decimal("0"), output_field=KG)))
-        .get("s") or Decimal("0")
+        .aggregate(v=Coalesce(Sum("delta_kg", output_field=KG), Value(kg0, output_field=KG)))
+        ["v"] or kg0
     )
-    in_month_out_kg = -in_month_out_neg  # display as positive "used" kg
-    closing_kg = opening_kg + in_month_in_kg + in_month_out_neg  # out_neg is negative
+    used_out_kg = -in_month_out_neg
+
+    closing_kg = opening_kg + in_month_in_kg + in_month_out_neg
 
     rows_mat_balance = [
         ["Opening Balance (kg)", f"{dkg(opening_kg):,.3f}"],
         ["Received IN (kg)",     f"{dkg(in_month_in_kg):,.3f}"],
-        ["Used OUT (kg)",        f"{dkg(in_month_out_kg):,.3f}"],
+        ["Used OUT (kg)",        f"{dkg(used_out_kg):,.3f}"],
         ["Closing Balance (kg)", f"{dkg(closing_kg):,.3f}"],
     ]
-
     # --- PDF: header & layout ---
     pdf_path = _statement_path(customer, year, month)
     c = canvas.Canvas(str(pdf_path), pagesize=A4)
