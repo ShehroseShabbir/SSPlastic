@@ -80,7 +80,6 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     "django.contrib.humanize",
-    'django_countries',
     'rest_framework',
     'core.apps.CoreConfig',
 ]
@@ -178,7 +177,7 @@ USE_TZ = True
 # Static & media
 # -----------------------------------
 STATIC_URL = '/static/'
-#STATIC_ROOT = BASE_DIR / 'staticfiles'     # for collectstatic
+STATIC_ROOT = BASE_DIR / 'staticfiles'     # for collectstatic
 
 # WhiteNoise compressed manifest storage (great for cPanel)
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
