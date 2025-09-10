@@ -1,9 +1,10 @@
 # core/models/materials.py  (your file shown above)
 
+from django.utils import timezone
 from decimal import Decimal
 from django.db import models
 from django.db.models import Q, UniqueConstraint
-
+from django.core.exceptions import ValidationError
 from core.models.customers import Customer
 from core.models.orders import Order
 from core.utils_weight import dkg
@@ -30,14 +31,30 @@ class MaterialReceipt(models.Model):
     bags_count = models.PositiveIntegerField(default=0)         # e.g. 4 bags
     extra_kg   = models.DecimalField(max_digits=10, decimal_places=3, default=0)  # non-bag kg if any
     notes      = models.CharField(max_length=255, blank=True)
+    # Opening/correction flag (allows negatives)
+    is_opening_adjustment = models.BooleanField(
+        default=False,
+        help_text="Tick for one-time opening/correction. Allows negative kg and syncs to ledger as adjustment."
+    )
 
     @property
     def total_kg(self):
         return dkg(self.bags_count) * self.BAG_WEIGHT_KG + dkg(self.extra_kg)
 
+    def clean(self):
+        super().clean()
+        total = self.total_kg
+        if self.is_opening_adjustment:
+            if total == 0:
+                raise ValidationError("Opening adjustment total cannot be 0 kg.")
+        else:
+            if total <= 0:
+                raise ValidationError("Material Receipt must be > 0 kg. For negatives, tick 'opening adjustment'.")
+
     def __str__(self):
+        tag = " (ADJ)" if self.is_opening_adjustment else ""
         mt = f" · {self.get_material_type_display()}" if self.material_type else ""
-        return f"{self.customer.company_name} · {self.date}{mt} · {self.total_kg} kg"
+        return f"{self.customer.company_name} · {self.date}{mt}{tag} · {self.total_kg} kg"
 
     class Meta:
         verbose_name = "Material Receipt"
@@ -65,7 +82,7 @@ class CustomerMaterialLedger(models.Model):
         MaterialReceipt, null=True, blank=True, on_delete=models.CASCADE
     )
 
-    date     = models.DateTimeField(auto_now_add=True)
+    date     = models.DateTimeField(default=timezone.now)  # <- replace auto_now_add=True
     type     = models.CharField(max_length=3, choices=EntryType.choices)
     delta_kg = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0.000"))
     memo     = models.CharField(max_length=255, blank=True)

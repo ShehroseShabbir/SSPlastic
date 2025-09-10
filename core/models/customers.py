@@ -6,8 +6,7 @@ from django.db.models import Sum, Q
 from django.conf import settings
 from core.models.common import money_int_pk
 from core.utils_money import to_rupees_int
-from django_countries.fields import CountryField
-
+from django.apps import apps
 # You already have FINAL_STATES in models_ar
 from ..models_ar import FINAL_STATES
 
@@ -30,6 +29,7 @@ class Customer(models.Model):
         default=0,
         help_text="Auto: carry + final orders − payments (int PKR)."
     )
+
     @property
     def carry_remaining_pkr(self) -> int:
         """
@@ -50,15 +50,21 @@ class Customer(models.Model):
         return remaining if remaining > 0 else 0
     # ---- Material balance (kg) ----
     @property
-    def material_balance_kg(self) -> Decimal:
-        """
-        Net KG = sum of material ledger deltas (IN minus OUT). 3dp decimal.
-        """
+    def material_balance_kg(self):
+        # read the cached value, still expose a property name you already use
+        return (self.material_balance_kg_cached or Decimal("0.000")).quantize(Decimal("0.001"))
+
+    def refresh_material_balance(self, save: bool = True) -> Decimal:
+        """Recalculate from ledger and optionally persist to cached field."""
         KG = DecimalField(max_digits=12, decimal_places=3)
         agg = self.material_ledger.aggregate(
             s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
         )
-        return agg["s"] or Decimal("0.000")
+        val = agg["s"] or Decimal("0.000")
+        if save:
+            self.material_balance_kg_cached = val
+            self.save(update_fields=["material_balance_kg_cached"])
+        return val
 
     # ---- Pending balance (live compute fallback) ----
     @property
