@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 from django.contrib import admin, messages
 from django.urls import path, reverse,NoReverseMatch
 from django import forms
@@ -11,7 +12,7 @@ from django.utils.timezone import now
 from django.template.response import TemplateResponse
 from pathlib import Path
 from decimal import Decimal
-from calendar import month_name
+from calendar import month_name, monthrange
 from django.db import transaction
 from core.admin_forms.raw_material import PurchaseForm, SellForm, TransferForm
 from core.models.common import money_int_pk
@@ -323,21 +324,57 @@ class CustomerAdmin(admin.ModelAdmin):
     )
     search_fields = ("company_name", "contact_name", "phone", "email")
     ordering = ("company_name",)
+     # ---------- Helpers ----------
+    def _compute_range(self, request):
+        """
+        Returns (start_date, end_date, preset, year, month) using:
+          - preset=month -> uses year/month selects
+          - 30/60/90/120 -> last N days (to today)
+          - year -> Jan 1 ... Dec 31 of selected year
+        """
+        today = date.today()
+        preset = request.GET.get("preset", "month")  # "month", "30","60","90","120","year"
 
-    # ----- URLs: preview/download statement -----
+        # defaults from today
+        y = int(request.GET.get("year", today.year))
+        m = int(request.GET.get("month", today.month))
+
+        if preset == "month":
+            start = date(y, m, 1)
+            end = date(y, m, monthrange(y, m)[1])
+        elif preset in {"30", "60", "90", "120"}:
+            days = int(preset)
+            end = today
+            start = today - timedelta(days=days)
+        elif preset == "year":
+            start = date(y, 1, 1)
+            end = date(y, 12, 31)
+        else:
+            raise ValueError("Invalid period preset")
+        return start, end, preset, y, m
+    
+    # ---------- URLs ----------
     def get_urls(self):
         urls = super().get_urls()
         my_urls = [
+            # Statement (same template as your billing PDF), but supports arbitrary ranges
             path(
-                "<int:pk>/download-statement/",
-                self.admin_site.admin_view(self.download_statement),
-                name="core_customer_download_statement",
+                "<int:pk>/preview-range/",
+                self.admin_site.admin_view(self.preview_statement_range),
+                name="core_customer_preview_range",
             ),
             path(
-                "<int:pk>/preview-statement/",
-                self.admin_site.admin_view(self.preview_statement),
-                name="core_customer_preview_statement",
+                "<int:pk>/download-range/",
+                self.admin_site.admin_view(self.download_statement_range),
+                name="core_customer_download_range",
             ),
+            # Printable ledger view for a range
+            path(
+                "<int:pk>/preview-ledger/",
+                self.admin_site.admin_view(self.preview_ledger),
+                name="core_customer_preview_ledger",
+            ),
+
         ]
         return my_urls + urls
     
@@ -393,48 +430,89 @@ class CustomerAdmin(admin.ModelAdmin):
             return None, None
         return year, month
 
-    def download_statement(self, request, pk):
-        year, month = self._parse_period(request)
-        if year is None:
-            return HttpResponseBadRequest("Invalid year/month.")
-
-        # Lazy import to avoid circulars; adjust to your actual module path
+    def download_statement_range(self, request, pk):
         try:
-            from core.utils import generate_customer_monthly_statement
-        except Exception:
-            from core.utils import generate_customer_monthly_statement  # fallback if you use a different path
-
-        try:
-            pdf_path = generate_customer_monthly_statement(pk, year, month, user=request.user)
+            start, end, preset, y, m = self._compute_range(request)
         except Exception as e:
             return HttpResponseBadRequest(str(e))
+
+        try:
+            from core.utils import generate_customer_statement_range
+        except Exception:
+            from core.utils import generate_customer_monthly_statement as _monthly
+            if preset != "month":
+                return HttpResponseBadRequest("Range generator missing. Please add generate_customer_statement_range.")
+            pdf_path = _monthly(pk, y, m, user=request.user)
+        else:
+            pdf_path = generate_customer_statement_range(pk, start, end, user=request.user)
 
         fname = Path(pdf_path).name
         return FileResponse(
-            open(pdf_path, "rb"), as_attachment=True, filename=fname, content_type="application/pdf"
+            open(pdf_path, "rb"),
+            as_attachment=True,
+            filename=fname,
+            content_type="application/pdf",
         )
 
-    def preview_statement(self, request, pk):
-        year, month = self._parse_period(request)
-        if year is None:
-            return HttpResponseBadRequest("Invalid year/month.")
-
+    # ---------- Range handlers ----------
+    def preview_statement_range(self, request, pk):
         try:
-            from core.utils import generate_customer_monthly_statement
-        except Exception:
-            from core.utils import generate_customer_monthly_statement
-
-        try:
-            pdf_path = generate_customer_monthly_statement(pk, year, month, user=request.user)
+            start, end, preset, y, m = self._compute_range(request)
         except Exception as e:
             return HttpResponseBadRequest(str(e))
+
+        # Your range-capable generator (see note below)
+        try:
+            from core.utils import generate_customer_statement_range
+        except Exception:
+            # Fallback to monthly if you haven't created the range version yet
+            from core.utils import generate_customer_monthly_statement as _monthly
+            # emulate by calling monthly if preset == month, else bail
+            if preset != "month":
+                return HttpResponseBadRequest("Range generator missing. Please add generate_customer_statement_range.")
+            pdf_path = _monthly(pk, y, m, user=request.user)
+        else:
+            pdf_path = generate_customer_statement_range(pk, start, end, user=request.user)
+
+        fname = Path(pdf_path).name
+        resp = FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
+        resp["Content-Disposition"] = f'inline; filename="{fname}"'
+        return resp
+    
+    def preview_ledger(self, request, pk):
+        from datetime import timedelta
+        today = now().date()
+        preset = request.GET.get("preset", "month")
+
+        # Work out range
+        if preset == "30":
+            start_date = today - timedelta(days=30)
+            end_date = today
+        elif preset == "60":
+            start_date = today - timedelta(days=60)
+            end_date = today
+        elif preset == "90":
+            start_date = today - timedelta(days=90)
+            end_date = today
+        elif preset == "120":
+            start_date = today - timedelta(days=120)
+            end_date = today
+        elif preset == "year":
+            start_date = date(today.year, 1, 1)
+            end_date = date(today.year, 12, 31)
+        else:  # month
+            start_date = date(today.year, today.month, 1)
+            end_date = today
+
+        from core.utils import generate_customer_ledger_pdf
+        pdf_path = generate_customer_ledger_pdf(pk, start_date, end_date, user=request.user)
 
         fname = Path(pdf_path).name
         resp = FileResponse(open(pdf_path, "rb"), content_type="application/pdf")
         resp["Content-Disposition"] = f'inline; filename="{fname}"'
         return resp
 
-    # ----- Change form extras (month/year dropdown + quick ledger links) -----
+    # ---------- Change form extras (adds the Period dropdown + buttons) ----------
     def change_view(self, request, object_id, form_url="", extra_context=None):
         extra_context = extra_context or {}
 
@@ -444,26 +522,28 @@ class CustomerAdmin(admin.ModelAdmin):
 
         default_month = int(request.GET.get("month", today.month))
         default_year = int(request.GET.get("year", today.year))
+        default_preset = request.GET.get("preset", "month")
 
-        download_url = reverse("admin:core_customer_download_statement", args=[object_id])
-        preview_url = reverse("admin:core_customer_preview_statement", args=[object_id])
+        # URLs for the buttons
+        preview_range_url = reverse("admin:core_customer_preview_range", args=[object_id])
+        download_range_url = reverse("admin:core_customer_download_range", args=[object_id])
+        ledger_preview_url = reverse("admin:core_customer_preview_ledger", args=[object_id])
 
+        # existing quick links
         cash_ledger_url = reverse("admin:core_payment_changelist") + f"?customer__id__exact={object_id}"
-        material_ledger_url = (
-            reverse("admin:core_customermaterialledger_changelist") + f"?customer__id__exact={object_id}"
-        )
-        allocation_ledger_url = (
-            reverse("admin:core_paymentallocation_changelist") + f"?order__customer__id__exact={object_id}"
-        )
+        material_ledger_url = reverse("admin:core_customermaterialledger_changelist") + f"?customer__id__exact={object_id}"
+        allocation_ledger_url = reverse("admin:core_paymentallocation_changelist") + f"?order__customer__id__exact={object_id}"
 
         extra_context.update(
             {
-                "statement_download_url": download_url,
-                "statement_preview_url": preview_url,
                 "months": months,
                 "years": years,
                 "default_month": default_month,
                 "default_year": default_year,
+                "default_preset": default_preset,
+                "statement_preview_range_url": preview_range_url,
+                "statement_download_range_url": download_range_url,
+                "ledger_preview_url": ledger_preview_url,
                 "cash_ledger_url": cash_ledger_url,
                 "material_ledger_url": material_ledger_url,
                 "allocation_ledger_url": allocation_ledger_url,
@@ -756,7 +836,7 @@ class OrderItemInline(admin.TabularInline):
 class OrderAdmin(admin.ModelAdmin):
     change_form_template = 'core/order_change_form.html'
     formset = OrderItemInlineFormSet,
-    list_display = ("invoice_number", "customer", "status", "grand_total_display", "total_allocated_display", "outstanding_balance_display",  "target_total_kg" ,"produced_kg")
+    list_display = ("invoice_number","dcNumber","customer", "status", "grand_total_display", "total_allocated_display", "outstanding_balance_display",  "target_total_kg" ,"produced_kg")
     list_filter = ("status", "customer")
     search_fields = ("customer__company_name", "invoice_number")
     inlines = [OrderRollInline, OrderAllocationInlineReadonly]
@@ -816,6 +896,12 @@ class OrderAdmin(admin.ModelAdmin):
     def total_paid_display(self, obj):
         return f"{obj.total_paid:,.2f}"
     total_paid_display.short_description = "Paid"
+
+    @admin.display(description="DC #")
+    def dcNumber(self, obj):
+        return obj.delivery_challan
+    
+    
 
     def outstanding_balance_display(self, obj):
         return f"{obj.outstanding_balance:,.2f}"

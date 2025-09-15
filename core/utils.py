@@ -191,6 +191,341 @@ def _period_bounds(year: int, month: int):
 
     return first, last, start_dt, end_dt
 
+# ---------- RANGE HELPERS (add below _period_bounds) ----------
+def _period_bounds_from_dates(start_date: date, end_date: date):
+    """
+    Convert plain dates into:
+      first, last (DATEs)
+      period_start, period_end (TZ-aware datetimes spanning the full days)
+    """
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date  # swap defensively
+
+    tz = timezone.get_current_timezone()
+    start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=tz)
+    end_dt   = datetime.combine(end_date,   datetime.max.time(), tzinfo=tz)
+    return start_date, end_date, start_dt, end_dt
+
+
+def _statement_path_range(customer: Customer, start: date, end: date) -> Path:
+    """
+    File name for arbitrary date range. Example:
+      Statement-Customer-2025-01-01_to_2025-03-31.pdf
+    """
+    base = Path(getattr(settings, "INVOICE_OUTPUT_DIR", "invoices"))
+    base.mkdir(parents=True, exist_ok=True)
+    safe_name = "".join(ch for ch in customer.company_name if ch.isalnum() or ch in (" ", "_", "-")).strip()
+    return base / f"Statement-{safe_name}-{start.isoformat()}_to_{end.isoformat()}.pdf"
+
+
+def _nice_range_label(start, end):
+    """
+    Human-friendly label for a date range.
+    Works with datetime/date/str.
+    """
+    def _fmt(d):
+        if isinstance(d, str):
+            return d
+        if isinstance(d, datetime):
+            d = d.date()
+        if isinstance(d, date):
+            return d.strftime("%d %b %Y")
+        return str(d)
+
+    return f"{_fmt(start)} → {_fmt(end)}"
+
+
+def generate_customer_statement_range(customer_id: int, start_date: date, end_date: date, user=None) -> str:
+    """
+    Same statement as monthly, but for an arbitrary date range [start_date .. end_date].
+    Keeps your existing tables & math. Only the period window and labels change.
+    """
+    # --- Setup & Period ---
+    customer = Customer.objects.get(id=customer_id)
+    ss = get_site_settings()
+
+    first, last, period_start, period_end = _period_bounds_from_dates(start_date, end_date)
+    day_before = first - timedelta(days=1)
+    period_label = _nice_range_label(first, last)
+
+    # --- Opening A/R (money) BEFORE this period ---
+    charges_before_pkr = sum(
+        int(getattr(o, "grand_total_pkr", 0) or 0)
+        for o in Order.objects.filter(customer=customer, status__in=FINAL_STATES, order_date__lte=day_before)
+    )
+    payments_before_pkr = sum(
+        int(D(p.amount or 0))
+        for p in Payment.objects.filter(customer=customer, received_on__lte=day_before)
+    )
+    carry_pkr = int(customer.previous_pending_balance_pkr or 0)
+    opening_due_pkr = carry_pkr + charges_before_pkr - payments_before_pkr
+
+    # --- Invoices in range (ALL non-draft) ---
+    orders = (
+        Order.objects
+        .select_related("customer")
+        .prefetch_related("payment_allocations__payment")
+        .filter(customer=customer, order_date__range=(first, last))
+        .exclude(status="DRAFT")
+        .order_by("order_date", "id")
+    )
+
+    rows_orders = []
+    total_qty   = Decimal("0.000")
+    total_inv   = Decimal("0.00")
+    total_paid  = Decimal("0.00")
+    total_due   = Decimal("0.00")
+    charges_period_pkr = 0
+    payments_period_pkr = 0
+
+    for o in orders:
+        qty_kg = dkg(getattr(o, "target_total_kg", 0) or 0)
+        rate   = D(getattr(o, "price_per_kg", 0) or 0)
+        invoice_total = D(o.grand_total)
+
+        allocs = getattr(o, "payment_allocations", None)
+        paid_raw = sum((D(a.amount or 0)) for a in allocs.all()) if allocs is not None else Decimal("0.00")
+        paid = D(paid_raw)
+        due = D(invoice_total - paid)
+
+        total_qty  += qty_kg
+        total_inv  += invoice_total
+        total_paid += paid
+        total_due  += due
+        charges_period_pkr += int(getattr(o, "grand_total_pkr", 0) or 0)
+
+        rows_orders.append([
+            str(getattr(o, "delivery_challan_date", "") or getattr(o, "order_date", "") or ""),
+            getattr(o, "invoice_number", f"INV{o.id}") or "",
+            str(getattr(o, "delivery_challan", "") or ""),
+            str(getattr(o, "roll_size", "") or ""),
+            f"{qty_kg:,.3f}",
+            dkg(rate),
+            pkr_str(invoice_total),
+            pkr_str(paid),
+            pkr_str(due),
+        ])
+
+    rows_orders.append(["", "", "", "Totals", f"{total_qty:,.3f}", "", pkr_str(total_inv), pkr_str(total_paid), pkr_str(total_due)])
+
+    # --- Payments in range ---
+    payments_qs = Payment.objects.filter(customer=customer, received_on__range=(first, last)).order_by("received_on", "id")
+    rows_payments = []
+    payments_total = Decimal("0.00")
+    for p in payments_qs:
+        amt = D(p.amount or 0)
+        payments_total += amt
+        payments_period_pkr += int(amt)
+        note_bits = []
+        if getattr(p, "reference", ""): note_bits.append(str(p.reference))
+        if getattr(p, "notes", ""    ): note_bits.append(str(p.notes))
+        notes = " · ".join(note_bits)
+        rows_payments.append([str(getattr(p, "received_on", "") or ""), str(getattr(p, "method", "") or ""), notes or "—", pkr_str(amt)])
+    rows_payments.append(["", "", "Total", pkr_str(payments_total)])
+
+    # --- Material movement detail (both + and −) in range ---
+    rows_receipts = []
+    receipts_total = Decimal("0.000")
+    ledger_entries = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__range=(period_start, period_end))
+        .order_by("date", "id")
+    )
+    for rec in ledger_entries:
+        qty = dkg(Decimal(rec.delta_kg or 0))
+        rows_receipts.append([rec.date.date().isoformat(), str(rec.memo or "—"), f"{qty:,.3f}"])
+        receipts_total += qty
+    rows_receipts = rows_receipts or [["—", "—", "—"]]
+    if rows_receipts and rows_receipts[0][0] != "—":
+        rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
+
+    closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) - int(payments_period_pkr)
+
+    # --- Material balance summary (ledger only) for range ---
+    KG  = DecimalField(max_digits=12, decimal_places=3)
+    kg0 = Decimal("0.000")
+
+    opening_kg = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__lt=period_start)
+        .aggregate(v=Coalesce(Sum("delta_kg", output_field=KG), Value(kg0, output_field=KG)))
+        ["v"] or kg0
+    )
+    in_month_in_kg = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__range=(period_start, period_end), delta_kg__gt=0)
+        .aggregate(v=Coalesce(Sum("delta_kg", output_field=KG), Value(kg0, output_field=KG)))
+        ["v"] or kg0
+    )
+    in_month_out_neg = (
+        CustomerMaterialLedger.objects
+        .filter(customer=customer, date__range=(period_start, period_end), delta_kg__lt=0)
+        .aggregate(v=Coalesce(Sum("delta_kg", output_field=KG), Value(kg0, output_field=KG)))
+        ["v"] or kg0
+    )
+    used_out_kg = -in_month_out_neg
+    closing_kg = opening_kg + in_month_in_kg + in_month_out_neg
+
+    rows_mat_balance = [
+        ["Opening Balance (kg)", f"{dkg(opening_kg):,.3f}"],
+        ["Received IN (kg)",     f"{dkg(in_month_in_kg):,.3f}"],
+        ["Used OUT (kg)",        f"{dkg(used_out_kg):,.3f}"],
+        ["Closing Balance (kg)", f"{dkg(closing_kg):,.3f}"],
+    ]
+
+    # --- PDF: header & layout (labels adjusted for date span) ---
+    pdf_path = _statement_path_range(customer, first, last)
+    c = canvas.Canvas(str(pdf_path), pagesize=A4)
+    title = f"Statement-{customer.company_name}-{first.isoformat()}_to_{last.isoformat()}"
+    c.setTitle(title)
+    W, H = A4
+    margin = 15 * mm
+    right_x = W - margin
+    top_y = H - margin
+
+    # Logo/header (unchanged from your monthly)
+    logo_path = None
+    ss = get_site_settings()
+    if ss and getattr(ss, "logo", None):
+        try:
+            logo_path = ss.logo.path
+        except Exception:
+            logo_path = None
+    if not logo_path:
+        lp = getattr(settings, "INVOICE_LOGO_PATH", "")
+        logo_path = str(lp) if lp else None
+
+    logo_w, logo_h = (38 * mm, 18 * mm)
+    if logo_path:
+        try:
+            c.drawImage(ImageReader(logo_path), margin, top_y - logo_h, width=logo_w, height=logo_h,
+                        preserveAspectRatio=True, mask="auto")
+        except Exception:
+            pass
+
+    company_name = (ss.company_name if ss and ss.company_name else getattr(settings, "COMPANY_NAME", "Your Company"))
+    company_addr_lines = (
+        ss.company_address_list if ss and hasattr(ss, "company_address_list")
+        else getattr(settings, "COMPANY_ADDRESS_LINES", [])
+    )
+    _draw_multiline_right(c, [company_name] + list(_as_lines(company_addr_lines)), right_x, top_y, leading=14, font="Helvetica", size=10)
+
+    title_y = top_y - (logo_h + 35 if logo_path else 55)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawCentredString(W/2, title_y, f"{customer.company_name}")
+
+    meta_y = title_y - 22
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(W/2, meta_y, f"Statement ({period_label})")
+
+    # Reuse your table drawing code exactly as in monthly:
+    y = meta_y - 24
+
+    # Table 1: Invoices
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "Invoices (All)")
+    y -= 12
+    orders_table_data = [["Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Invoice Total", "Paid", "Amount Due"]] + (rows_orders or [["—"] * 9])
+    orders_base_cols = [70, 85, 50, 50, 85, 55, 80, 80, 80]
+    avail = W - 2 * margin
+    scale = min(1.0, avail / float(sum(orders_base_cols)))
+    orders_col_widths = [w * scale for w in orders_base_cols]
+    t1 = Table(orders_table_data, colWidths=orders_col_widths, repeatRows=1); t1.setStyle(style)
+    tw, th = t1.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    t1.drawOn(c, x_center, y - th); y = y - th - 30
+
+    # Table 2: Payments (Period)
+    if y < 120:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "Payments Received (Period)")
+    y -= 12
+    payments_table = [["Date", "Method", "Notes / Reference", "Amount"]] + (rows_payments or [["—"] * 4])
+    pay_base_cols = [90, 90, 260, 80]; scale = min(1.0, (W - 2 * margin) / float(sum(pay_base_cols))); pay_col_widths = [w * scale for w in pay_base_cols]
+    t2 = Table(payments_table, colWidths=pay_col_widths, repeatRows=1); t2.setStyle(style)
+    tw, th = t2.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    t2.drawOn(c, x_center, y - th); y = y - th - 30
+
+    # Table 3: Material detail (Period)
+    if y < 120:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "Material Movements (Period)")
+    y -= 12
+    receipts_table = [["Date", "Notes / Reference", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
+    rec_base_cols = [90, 300, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols))); rec_col_widths = [w * scale for w in rec_base_cols]
+    t3 = Table(receipts_table, colWidths=rec_col_widths, repeatRows=1); t3.setStyle(style)
+    tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    t3.drawOn(c, x_center, y - th); y = y - th - 30
+
+    # Material Balance Summary
+    if y < 120:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, "Material Balance Summary")
+    y -= 12
+    mat_base_cols = [220, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(mat_base_cols))); mat_col_widths = [w * scale for w in mat_base_cols]
+    t3 = Table(rows_mat_balance, colWidths=mat_col_widths, repeatRows=0); t3.setStyle(style)
+    tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    t3.drawOn(c, x_center, y - th); y = y - th - 30
+
+    # Bill Summary (range)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, f"Bill Summary ({period_label})")
+    y -= 12
+    closing_label = "Balance due (carry to next bill)" if closing_due_pkr >= 0 else "Advance on account (credit)"
+    closing_value = abs(int(closing_due_pkr))
+    summary_rows = [
+        [f"Opening balance (before {first.strftime('%b %Y')})", pkr_str(opening_due_pkr)],
+        ["+ Charges in period",                                 pkr_str(charges_period_pkr)],
+        ["− Payments received in period",                       pkr_str(payments_period_pkr)],
+        [closing_label,                                         pkr_str(closing_value)],
+    ]
+    sum_base_cols = [300, 140]; scale = min(1.0, (W - 2 * margin) / float(sum(sum_base_cols))); sum_col_widths = [w * scale for w in sum_base_cols]
+    t_sum = Table(summary_rows, colWidths=sum_col_widths, repeatRows=0); t_sum.setStyle(style)
+    tw, th = t_sum.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+    t_sum.drawOn(c, x_center, y - th)
+
+    y = y - th - 20
+    if ss and (getattr(ss, "notes", "") or getattr(ss, "notes_list", None)):
+        y = _draw_notes_box(c, W, H, ss, y)
+
+    bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+    _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+
+    c.save()
+    return str(pdf_path)
+
+
+################################################
+## Generate Monthly Customer Billing
+################################################
 def generate_customer_monthly_statement(customer_id: int, year: int, month: int, user=None) -> str:
     """
     Monthly statement for a customer:
@@ -619,14 +954,14 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     return str(pdf_path)
 
 
+################################################
+## End Customer Billing Monthly
+################################################
 
-# ---- End Customer Billing Monthly ------
 
-
-
-# ===========================
-# Invoice (single order) PDF
-# ===========================
+################################################
+## INVOICE (SINGLE ORDER) PDF
+################################################
 def _invoice_path(order: Order) -> Path:
     inv_no = order.invoice_number or f"SSP{order.id:05d}"
     base = Path(getattr(settings, "INVOICE_OUTPUT_DIR", "invoices"))
@@ -950,6 +1285,10 @@ def generate_invoice(order_id, user=None, out_path=None):
 
     c.save()
     return str(pdf_path)
+################################################
+## END INVOICE (SINGLE ORDER) PDF
+################################################
+
 
 # ====================
 # Email sender (PDF)
@@ -981,3 +1320,179 @@ def send_invoice_email(order_id, pdf_path, to_email=None, subject=None, body=Non
     email.attach_file(pdf_path)
     email.send(fail_silently=False)
     return True
+
+
+################################################
+## Customer Statement PDF (Ledgers)
+################################################
+
+def generate_customer_ledger_pdf(customer_id, start_date, end_date, user=None) -> str:
+    """
+    Customer material ledger: challan-book style table with the same
+    header, footer and TableStyle as the statement PDF.
+    Columns:
+      Date | DC # | Size | Micron | Treatment | Receipt | Issued | Customer
+    """
+    customer = Customer.objects.get(id=customer_id)
+    ss = get_site_settings()
+
+    # --- Query entries ---
+    entries = (
+    CustomerMaterialLedger.objects
+    .filter(customer=customer, date__range=(start_date, end_date))
+    .select_related("order", "receipt")
+    .order_by("order__delivery_challan", "date", "id")
+)
+
+    # --- Build rows ---
+    header = ["Date", "DC #", "Size", "Micron", "Treatment", "Receipt", "Issued", "Customer"]
+    rows = [header]
+
+    tot_in  = Decimal("0.000")
+    tot_out = Decimal("0.000")
+
+    for e in entries:
+        # Defaults
+        dc = ""
+        size = ""
+        micron = ""
+        treat = ""
+        recv = ""
+        issued = ""
+
+        # If OUT row is tied to an order, extract challan details
+        if e.type == "OUT" and e.order_id:
+            o = e.order
+            dc     = str(getattr(o, "delivery_challan", "") or "")
+            size   = str(getattr(o, "roll_size", "") or "")
+            # Pick your available fields for micron/treatment; adjust if your model differs
+            micron = str(getattr(o, "micron", "") or getattr(o, "micron_from", "") or "")
+            treat  = str(getattr(o, "current_type", "") or getattr(o, "current_type", "") or "")
+            issued_qty = dkg(Decimal(-(e.delta_kg or 0)))  # OUT is negative
+            issued = f"{issued_qty:,.3f}"
+            tot_out += issued_qty
+        elif e.type == "IN":
+            recv_qty = dkg(Decimal(e.delta_kg or 0))
+            recv = f"{recv_qty:,.3f}"
+            tot_in += recv_qty
+
+        rows.append([
+            e.date.date().isoformat(),
+            dc,
+            size,
+            micron,
+            treat,
+            recv,
+            issued,
+            customer.company_name,  # keep column for consistent look, same customer per sheet
+        ])
+
+    # Totals row
+    rows.append([
+        "", "", "", "", "Total",
+        f"{dkg(tot_in):,.3f}",
+        f"{dkg(tot_out):,.3f}",
+        "",
+    ])
+
+    # --- PDF path ---
+    safe_name = "".join(ch for ch in customer.company_name if ch.isalnum() or ch in (" ", "_", "-")).strip()
+    outdir = Path(getattr(settings, "INVOICE_OUTPUT_DIR", "invoices"))
+    outdir.mkdir(parents=True, exist_ok=True)
+    pdf_path = outdir / f"Ledger-{safe_name}-{start_date}_to_{end_date}.pdf"
+
+    # --- Canvas ---
+    c = canvas.Canvas(str(pdf_path), pagesize=A4)
+    W, H = A4
+    margin = 15 * mm
+    right_x = W - margin
+    top_y = H - margin
+
+    # --- Logo + header (same logic as statement) ---
+    logo_path = None
+    if ss and getattr(ss, "logo", None):
+        try:
+            logo_path = ss.logo.path
+        except Exception:
+            logo_path = None
+    if not logo_path:
+        lp = getattr(settings, "INVOICE_LOGO_PATH", "")
+        logo_path = str(lp) if lp else None
+
+    logo_w, logo_h = (38 * mm, 18 * mm)
+    if logo_path:
+        try:
+            c.drawImage(
+                ImageReader(logo_path),
+                margin, top_y - logo_h, width=logo_w, height=logo_h,
+                preserveAspectRatio=True, mask="auto"
+            )
+        except Exception:
+            pass
+
+    # Company text on the right (reuse your helper if you prefer)
+    company_name = (ss.company_name if ss and ss.company_name else getattr(settings, "COMPANY_NAME", "Your Company"))
+    company_addr_lines = (
+        ss.company_address_list if ss and hasattr(ss, "company_address_list")
+        else getattr(settings, "COMPANY_ADDRESS_LINES", [])
+    )
+    _draw_multiline_right(c, [company_name] + list(_as_lines(company_addr_lines)),
+                          right_x, top_y, leading=14, font="Helvetica", size=10)
+
+    # Title
+    c.setTitle(f"Ledger-{customer.company_name}-{start_date}_to_{end_date}")
+    title_y = top_y - (logo_h + 35 if logo_path else 55)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawCentredString(W/2, title_y, f"{customer.company_name}")
+
+    c.setFont("Helvetica", 14)
+    c.drawCentredString(
+    W / 2,
+    title_y - 22,
+    f"Ledger Records ({start_date.strftime('%d %B %Y')} → {end_date.strftime('%d %B %Y')})"
+    )
+
+    # Draw table
+    y = (title_y - 50)  # start below the subtitle
+
+    # Column widths (tuned for A4, similar density to your statement tables)
+    base_cols = [85, 45, 50, 55, 70, 75, 75, 120]  # Date, DC, Size, Micron, Treat, Recv, Issued, Customer
+    avail = W - 2 * margin
+    scale = min(1.0, avail / float(sum(base_cols)))
+    col_widths = [w * scale for w in base_cols]
+
+    t = Table(rows, colWidths=col_widths, repeatRows=1)
+    t.setStyle(style)  # <<< reuse your global TableStyle
+
+    tw, th = t.wrapOn(c, W, H)
+    x_center = (W - tw) / 2.0
+
+    # page break safety (same as statement)
+    if y - th < 90:
+        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                      else getattr(settings, "BANK_DETAILS_LINES", []))
+        _draw_footer(c, W, H, ss, bank_lines=bank_lines,
+                     ref=f"Ledger-{customer.company_name}-{start_date}_to_{end_date}", user=user)
+        c.showPage()
+        _draw_page_header(c, W, H, ss)
+        y = H - margin
+
+    t.drawOn(c, x_center, y - th)
+    y = y - th - 20
+
+    # Optional: notes block (same as statement)
+    if ss and (getattr(ss, "notes", "") or getattr(ss, "notes_list", None)):
+        y = _draw_notes_box(c, W, H, ss, y)
+
+    # Footer (same as statement)
+    bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                  else getattr(settings, "BANK_DETAILS_LINES", []))
+    _draw_footer(c, W, H, ss, bank_lines=bank_lines,
+                 ref=f"Ledger-{customer.company_name}-{start_date}_to_{end_date}", user=user)
+
+    c.save()
+    return str(pdf_path)
+
+################################################
+## END Customer Statement PDF (Ledgers)
+################################################

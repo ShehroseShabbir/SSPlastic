@@ -50,23 +50,29 @@ class Customer(models.Model):
                 paid += n
         remaining = carry - paid
         return remaining if remaining > 0 else 0
-    # ---- Material balance (kg) ----
-    @property
-    def material_balance_kg(self):
-        # read the cached value, still expose a property name you already use
-        return (self.material_balance_kg_cached or Decimal("0.000")).quantize(Decimal("0.001"))
 
-    def refresh_material_balance(self, save: bool = True) -> Decimal:
-        """Recalculate from ledger and optionally persist to cached field."""
-        KG = DecimalField(max_digits=12, decimal_places=3)
-        agg = self.material_ledger.aggregate(
-            s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
-        )
-        val = agg["s"] or Decimal("0.000")
-        if save:
-            self.material_balance_kg_cached = val
-            self.save(update_fields=["material_balance_kg_cached"])
-        return val
+    @property 
+    def material_balance_kg(self) -> Decimal: 
+        """ Net KG = sum of ledger deltas (IN minus OUT), quantified to 3 dp. """ 
+        KG = DecimalField(max_digits=12, decimal_places=3) 
+        agg = self.material_ledger.aggregate( 
+            s=Coalesce(Sum("delta_kg", output_field=KG), 
+                       Value(Decimal("0.000"), output_field=KG)) ) 
+        val = agg["s"] or Decimal("0.000") # quantize to 3 dp (matches your UI) 
+        return val.quantize(Decimal("0.001"))
+
+
+    # def refresh_material_balance(self, save: bool = True) -> Decimal:
+    #     """Recalculate from ledger and optionally persist to cached field."""
+    #     KG = DecimalField(max_digits=12, decimal_places=3)
+    #     agg = self.material_ledger.aggregate(
+    #         s=Coalesce(Sum("delta_kg", output_field=KG), Value(Decimal("0.000"), output_field=KG))
+    #     )
+    #     val = agg["s"] or Decimal("0.000")
+    #     if save:
+    #         self.material_balance_kg_cached = val
+    #         self.save(update_fields=["material_balance_kg_cached"])
+    #     return val
 
     # ---- Pending balance (live compute fallback) ----
     @property
