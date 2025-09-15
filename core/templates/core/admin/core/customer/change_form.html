@@ -82,31 +82,18 @@
 
 {% block object-tools-items %}
   {{ block.super }}
-    {% if raw_material_tools %}
-    <li>
-      <a class="button" href="{% url 'admin:core_customer_purchase_material' original.pk %}">
-        Purchase Raw Material
-      </a>
-    </li>
-    <li>
-      <a class="button" href="{% url 'admin:core_customer_sell_material' original.pk %}">
-        Sell Raw Material
-      </a>
-    </li>
-    <li>
-      <a class="button" href="{% url 'admin:core_customer_transfer_material' original.pk %}">
-        Transfer Raw Material
-      </a>
-    </li>
-  {% endif %}
+
   <li>
-    <form action="" method="get" class="statement-tools" style="display:flex; gap:.5rem; align-items:center;">
-      <label for="id-month">Month</label>
+    <form action="" method="get" class="statement-tools" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap;">
+      <label for="id-preset">Period</label>
       <span class="select-wrap">
-        <select id="id-month" name="month">
-          {% for mval, mname in months %}
-            <option value="{{ mval }}" {% if mval == default_month %}selected{% endif %}>{{ mname }}</option>
-          {% endfor %}
+        <select id="id-preset" name="preset">
+          <option value="month" {% if default_preset == "month" %}selected{% endif %}>Current Month</option>
+          <option value="30"   {% if default_preset == "30" %}selected{% endif %}>Last 30 days</option>
+          <option value="60"   {% if default_preset == "60" %}selected{% endif %}>Last 60 days</option>
+          <option value="90"   {% if default_preset == "90" %}selected{% endif %}>Last 90 days</option>
+          <option value="120"  {% if default_preset == "120" %}selected{% endif %}>Last 120 days</option>
+          <option value="year" {% if default_preset == "year" %}selected{% endif %}>This Year</option>
         </select>
       </span>
 
@@ -119,24 +106,68 @@
         </select>
       </span>
 
-      {# Preview: opens new tab with selected month/year #}
+      <label for="id-month">Month</label>
+      <span class="select-wrap">
+        <select id="id-month" name="month">
+          {% for mval, mname in months %}
+            <option value="{{ mval }}" {% if mval == default_month %}selected{% endif %}>{{ mname }}</option>
+          {% endfor %}
+        </select>
+      </span>
+
+      <!-- Preview Statement -->
       <button type="submit"
               class="button"
-              formaction="{{ statement_preview_url }}"
+              formaction="{{ statement_preview_range_url }}"
               formtarget="_blank" rel="noopener">
         Preview Statement
       </button>
 
-      {# Download: downloads with selected month/year #}
+      <!-- Download Statement -->
       <button type="submit"
               class="button"
-              formaction="{{ statement_download_url }}">
+              formaction="{{ statement_download_range_url }}">
         Download Statement
+      </button>
+
+      <!-- NEW: Printable Ledger Preview -->
+      <button type="submit"
+              class="button"
+              formaction="{{ ledger_preview_url }}"
+              formtarget="_blank" rel="noopener">
+        Preview Ledger
       </button>
     </form>
   </li>
-  
+
+  <script>
+    (function() {
+      const preset = document.getElementById('id-preset');
+      const yearSel = document.getElementById('id-year');
+      const monthSel = document.getElementById('id-month');
+
+      function toggleSelectors() {
+        const p = preset.value;
+        // Month: enable year + month
+        if (p === 'month') {
+          yearSel.disabled = false;
+          monthSel.disabled = false;
+        // Year: enable year only
+        } else if (p === 'year') {
+          yearSel.disabled = true;   // optional: you can allow changing year here if you want
+          monthSel.disabled = true;
+        // Rolling windows: disable both
+        } else {
+          yearSel.disabled = true;
+          monthSel.disabled = true;
+        }
+      }
+      preset.addEventListener('change', toggleSelectors);
+      toggleSelectors(); // initialize
+    })();
+  </script>
 {% endblock %}
+
 
 {# admin/core/customer/change_form.html (or extend the default and insert below object-tools) #}
 
