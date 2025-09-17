@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta
 from calendar import monthrange
 from django.db.models import Sum, Value, DecimalField, F, ExpressionWrapper
 from django.db.models.functions import Coalesce
+
+from core.models.common import money_int_pk
 from .utils_weight import dkg  # your Decimal quantizer
 # Models
 from .models import Order, MaterialReceipt, Customer, CustomerMaterialLedger  # reuse the single dkg
@@ -280,7 +282,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
 
     for o in orders:
         qty_kg = dkg(getattr(o, "target_total_kg", 0) or 0)
-        rate   = D(getattr(o, "price_per_kg", 0) or 0)
+        rate   = dkg(getattr(o, "price_per_kg", 0) or 0)
         invoice_total = D(o.grand_total)
 
         allocs = getattr(o, "payment_allocations", None)
@@ -300,7 +302,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
             str(getattr(o, "delivery_challan", "") or ""),
             str(getattr(o, "roll_size", "") or ""),
             f"{qty_kg:,.3f}",
-            dkg(rate),
+            pkr_str(rate),
             pkr_str(invoice_total),
             pkr_str(paid),
             pkr_str(due),
@@ -329,15 +331,16 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     ledger_entries = (
         CustomerMaterialLedger.objects
         .filter(customer=customer, date__range=(period_start, period_end))
+        #.exclude(order__isnull=False) ## To exclude the entries tied to orders.
         .order_by("date", "id")
     )
     for rec in ledger_entries:
         qty = dkg(Decimal(rec.delta_kg or 0))
-        rows_receipts.append([rec.date.date().isoformat(), str(rec.memo or "—"), f"{qty:,.3f}"])
+        rows_receipts.append([rec.date.date().isoformat(), str(rec.memo or "—"), str(rec.material_type or "-"), f"{qty:,.3f}"])
         receipts_total += qty
     rows_receipts = rows_receipts or [["—", "—", "—"]]
     if rows_receipts and rows_receipts[0][0] != "—":
-        rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
+        rows_receipts.append(["", "Total", "",f"{dkg(receipts_total):,.3f}"])
 
     closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) - int(payments_period_pkr)
 
@@ -464,8 +467,8 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, y, "Material Movements (Period)")
     y -= 12
-    receipts_table = [["Date", "Notes / Reference", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
-    rec_base_cols = [90, 300, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols))); rec_col_widths = [w * scale for w in rec_base_cols]
+    receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
+    rec_base_cols = [90, 200, 100, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols))); rec_col_widths = [w * scale for w in rec_base_cols]
     t3 = Table(receipts_table, colWidths=rec_col_widths, repeatRows=1); t3.setStyle(style)
     tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
     if y - th < 90:
@@ -572,7 +575,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
 
     for o in orders:
         qty_kg = dkg(getattr(o, "target_total_kg", 0) or 0)
-        rate   = D(getattr(o, "price_per_kg", 0) or 0)
+        rate   = pkr_str(getattr(o, "price_per_kg", 0) or 0)
 
         # model computes GST if applicable
         invoice_total = D(o.grand_total)
@@ -595,7 +598,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
             str(getattr(o, "delivery_challan", "") or ""),
             str(getattr(o, "roll_size", "") or ""),
             f"{qty_kg:,.3f}",
-            dkg(rate),                 # Rate (money) -> PKR int format
+            pkr_str(rate),                 # Rate (money) -> PKR int format
             pkr_str(invoice_total),        # Invoice Total
             pkr_str(paid),                 # Paid
             pkr_str(due),                  # Amount Due
