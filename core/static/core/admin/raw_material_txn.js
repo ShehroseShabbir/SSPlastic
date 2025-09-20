@@ -54,7 +54,7 @@
       show(rowTo,       true);
       show(rowQty,      true);
       show(rowRate,     true);
-      show(rowAmt,      true);  // you may let it auto-calc server-side too
+      show(rowAmt,      false);  // you may let it auto-calc server-side too
       show(rowDC,       true);
       setReadOnly("qty_kg", false);
       setReadOnly("amount_pkr", false);
@@ -76,9 +76,9 @@
     var kindSel = document.getElementById("id_kind");
     if (!kindSel || kindSel.value !== "PURCHASE") return;
     var bags = parseInt(document.getElementById("id_bags_count")?.value || "0", 10);
-    var rate = parseInt(document.getElementById("id_rate_pkr")?.value || "0", 10);
+    var rate = parseFloat(document.getElementById("id_rate_pkr")?.value || "0", 10);
     var qty  = bags * 25; // display only; server recomputes on save
-    var amt  = qty * rate;
+    var amt  = (rate * 55) * bags;
     var qtyInput = document.getElementById("id_qty_kg");
     var amtInput = document.getElementById("id_amount_pkr");
     if (qtyInput) qtyInput.value = qty.toFixed(3);

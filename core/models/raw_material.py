@@ -66,11 +66,18 @@ class RawMaterialTxn(models.Model):
     qty_kg = models.DecimalField(
         max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0.001"))]
     )
-    rate_pkr = models.BigIntegerField(
-        default=0, validators=[MinValueValidator(0)], help_text="Rate per kg (PKR, whole rupees)."
+    # allow decimals in rate (e.g., 52.75 PKR/kg)
+    rate_pkr = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Rate per kg (PKR, can include decimals)."
     )
-    amount_pkr = models.BigIntegerField(
-        default=0, validators=[MinValueValidator(0)], help_text="Total amount in PKR (ints)."
+    amount_pkr = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        default=Decimal("0.00"), 
+        validators=[MinValueValidator(0)], 
+        help_text="Total amount in PKR."
     )
 
     # Extra capture for your workflow
@@ -99,7 +106,8 @@ class RawMaterialTxn(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.get_kind_display()} · {self.qty_kg} kg @ {self.rate_pkr} PKR"
+        rate = Decimal(self.rate_pkr or 0).quantize(Decimal("0.01"))
+        return f"{self.get_kind_display()} · {self.qty_kg} kg @ {rate} PKR/kg"
 
     # ---- Company Stock bucket ---------------------------------------------
     @staticmethod
@@ -128,7 +136,7 @@ class RawMaterialTxn(models.Model):
             if (self.bags_count or 0) > 0:
                 self.qty_kg = (Decimal(self.bags_count) * BAG_WEIGHT_KG).quantize(Decimal("0.001"))
 
-        q = dkg(self.qty_kg or 0)
+        q = dkg(self.bags_count or 0)
         if q <= Decimal("0"):
             raise ValidationError("Quantity must be > 0 (bags or kg).")
 
@@ -154,7 +162,11 @@ class RawMaterialTxn(models.Model):
 
         # Always compute amount for PURCHASE/SALE (keeps data consistent)
         if self.kind in (self.Kind.PURCHASE, self.Kind.SALE):
-            self.amount_pkr = int((Decimal(int(self.rate_pkr or 0)) * q).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+            rate_with_constant = Decimal(self.rate_pkr or 0) * Decimal("55")
+
+            rate = Decimal(self.rate_pkr or 0)  # keep decimals!
+            self.amount_pkr = (rate_with_constant * Decimal(self.bags_count or 0)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            
 
 
     # ---- Apply to ledger (atomic) -----------------------------------------
