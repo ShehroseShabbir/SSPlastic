@@ -207,16 +207,16 @@ def generate_rm_purchase_statement(purchase_id: int, *, user=None):
 
     # --- Purchase summary (header row + single data row) ---
     kg        = D(str(p.qty_kg or 0)).quantize(D("0.000"))
-    rate_int  = int(p.rate_pkr or 0)
+    rate_int  = D(p.rate_pkr or 0).quantize(D("0.00"))
     total_int = int(p.amount_pkr or 0)
 
-    summary_headers = ["DC #", "Material", "Bags", "Qty (kg)", "Rate (PKR/kg)", "Total"]
+    summary_headers = ["DC #", "Material", "Bags", "Qty (kg)", "Rate", "Total"]
     summary_values  = [
         p.dc_number or "—",
         (getattr(p, "material_type", "") or "—"),
         str(p.bags_count or 0),
         f"{kg:.3f}",
-        pkr_str(rate_int),
+        str(rate_int),
         pkr_str(total_int),
     ]
     summary_data = [summary_headers, summary_values]

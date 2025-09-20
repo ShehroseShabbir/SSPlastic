@@ -613,16 +613,15 @@ class RawMaterialTxnAdmin(admin.ModelAdmin):
     search_fields = ("supplier_name","dc_number","memo","to_customer__company_name","from_customer__company_name")
     autocomplete_fields = ("from_customer","to_customer")
     inlines = (PurchasePaymentInline,)
-
     
     # Keep your server-side safety (apply() calculates and writes ledger)
     def save_model(self, request, obj, form, change):
         obj.apply(user=request.user)
         form.save_m2m()
     
-    @admin.display(description="Rate Per (KG)")
+    @admin.display(description="Rate")
     def rate_display(self, obj):
-        return money_int_pk(obj.rate_pkr)    
+        return Decimal(obj.rate_pkr)    
     @admin.display(description="Outstanding (PKR)")
     def supplier_due_display(self, obj):
         if obj.kind != RawMaterialTxn.Kind.PURCHASE:
