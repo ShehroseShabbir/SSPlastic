@@ -49,10 +49,10 @@
     } else if (k === "SALE") {
       // from company stock → customer; user inputs qty, rate, to_customer
       show(rowSupplier, false);
-      show(rowBags,     false);
+      show(rowBags,     true);
       show(rowFrom,     false); // server sets to company stock
       show(rowTo,       true);
-      show(rowQty,      true);
+      show(rowQty,      false);
       show(rowRate,     true);
       show(rowAmt,      false);  // you may let it auto-calc server-side too
       show(rowDC,       true);

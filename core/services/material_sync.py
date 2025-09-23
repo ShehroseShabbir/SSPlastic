@@ -159,6 +159,8 @@ def _order_item_deleted(sender, instance, **kwargs):
         sync_order_material_ledger(order)
 
 
+
+
 # --- (Optional) Cached customer material balance ---
 # If you REMOVED the cached balance on Customer (material_balance_kg_cached),
 # delete the receiver below entirely. If you still have the cache and want to

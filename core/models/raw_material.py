@@ -6,13 +6,15 @@ from django.db import models, transaction
 from django.utils import timezone
 from django.core.validators import MinValueValidator
 from django.db.models import Sum
-
+from django.core.exceptions import ValidationError
+from core.models.materials import CustomerMaterialLedger as L
 from core.models.customers import Customer
 from core.models.materials import CustomerMaterialLedger  # ← adjust if your path differs
 from core.models.common import BANK_NAMES  # for supplier payment bank choices
 from core.utils_weight import dkg  # returns Decimal with 3dp
 
-BAG_WEIGHT_KG = Decimal("25.000")
+BAG_WEIGHT_KG        = Decimal("25.000")  # display only
+BAG_PRICE_CONSTANT   = Decimal("55")      # your business constant (not kg)
 
 # Keep methods simple (no import from AR payments to avoid mixing A/R & A/P)
 SUPPLIER_PAYMENT_METHODS = [
@@ -63,20 +65,18 @@ class RawMaterialTxn(models.Model):
     )
 
     # Quantities & money
-    qty_kg = models.DecimalField(
-        max_digits=12, decimal_places=3, validators=[MinValueValidator(Decimal("0.001"))]
-    )
+    qty_kg = models.DecimalField(max_digits=12, decimal_places=3, blank=True, null=True)
     # allow decimals in rate (e.g., 52.75 PKR/kg)
     rate_pkr = models.DecimalField(
-        max_digits=12, decimal_places=2,
+        max_digits=12, decimal_places=5,
         default=Decimal("0.00"),
         validators=[MinValueValidator(Decimal("0.00"))],
-        help_text="Rate per kg (PKR, can include decimals)."
+        help_text="Rate per bag (PKR, can include decimals)."
     )
     amount_pkr = models.DecimalField(
-        max_digits=12, decimal_places=2,
+        max_digits=12, decimal_places=5,
         default=Decimal("0.00"), 
-        validators=[MinValueValidator(0)], 
+        validators=[MinValueValidator(0.00)], 
         help_text="Total amount in PKR."
     )
 
@@ -124,111 +124,111 @@ class RawMaterialTxn(models.Model):
 
     # ---- Validation & normalization ---------------------------------------
     def clean(self):
-        from django.core.exceptions import ValidationError
+        # --- Normalize qty_kg from bags when provided (all kinds) ---
+        if (self.bags_count or 0) > 0:
+            self.qty_kg = (Decimal(self.bags_count) * BAG_WEIGHT_KG).quantize(Decimal("0.001"))
 
-        # Bags dominate explicit kg entry for PURCHASE
+        q = (self.qty_kg or Decimal("0.000"))
+
+        # --- Endpoint validation + per-kind rules ---
         if self.kind == self.Kind.PURCHASE:
             if (self.bags_count or 0) <= 0:
-                raise ValidationError("Bags count must be > 0 for a purchase.")
-            self.qty_kg = (Decimal(self.bags_count) * BAG_WEIGHT_KG).quantize(Decimal("0.001"))
-        else:
-            # for SALE/TRANSFER allow explicit kg (still accept bags as shortcut)
-            if (self.bags_count or 0) > 0:
-                self.qty_kg = (Decimal(self.bags_count) * BAG_WEIGHT_KG).quantize(Decimal("0.001"))
-
-        q = dkg(self.bags_count or 0)
-        if q <= Decimal("0"):
-            raise ValidationError("Quantity must be > 0 (bags or kg).")
-
-        # Endpoints per kind
-        if self.kind == self.Kind.PURCHASE:
+                raise ValidationError({"bags_count": "Bags count must be > 0 for a purchase."})
             if not self.supplier_name:
-                raise ValidationError("Supplier name is required for a purchase.")
+                raise ValidationError({"supplier_name": "Supplier name is required for a purchase."})
             self.from_customer = None
-            self.to_customer = self.company_stock_customer()
+            self.to_customer   = self.company_stock_customer()
 
         elif self.kind == self.Kind.SALE:
             if not self.to_customer:
-                raise ValidationError("Target customer is required for a sale.")
+                raise ValidationError({"to_customer": "Select the customer to sell to."})
+            # qty required for sale: either bags or explicit qty_kg
+            if (self.bags_count or 0) <= 0 and q <= 0:
+                raise ValidationError({"bags_count": "Enter bags (or quantity)."})
             self.from_customer = self.company_stock_customer()
 
         elif self.kind == self.Kind.TRANSFER:
             if not (self.from_customer and self.to_customer):
-                raise ValidationError("Both from_customer and to_customer are required for a transfer.")
+                raise ValidationError({"to_customer": "Select both From and To customers."})
             if self.from_customer_id == self.to_customer_id:
-                raise ValidationError("From/To customers must be different.")
+                raise ValidationError({"to_customer": "From/To customers must be different."})
+            if (self.bags_count or 0) <= 0 and q <= 0:
+                raise ValidationError({"bags_count": "Enter bags (or quantity) for the transfer."})
         else:
             raise ValidationError("Unknown transaction kind.")
 
-        # Always compute amount for PURCHASE/SALE (keeps data consistent)
+        # --- Commercial amount (per-bag pricing, independent of qty_kg) ---
+        # amount_pkr = (rate_pkr * 55) * bags_count
         if self.kind in (self.Kind.PURCHASE, self.Kind.SALE):
-            rate_with_constant = Decimal(self.rate_pkr or 0) * Decimal("55")
-
-            rate = Decimal(self.rate_pkr or 0)  # keep decimals!
-            self.amount_pkr = (rate_with_constant * Decimal(self.bags_count or 0)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            rate = Decimal(self.rate_pkr or 0)
+            bags = Decimal(self.bags_count or 0)
+            per_bag = (rate * BAG_PRICE_CONSTANT)
+            # store as Decimal(2dp); change to 'Decimal(\"1\")' + int(...) if you store whole rupees
+            self.amount_pkr = (per_bag * bags).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             
 
 
-    # ---- Apply to ledger (atomic) -----------------------------------------
     @transaction.atomic
     def apply(self, user=None):
-        """
-        Writes kg deltas to CustomerMaterialLedger and saves the txn atomically.
-        PURCHASE: IN to company stock
-        SALE:     OUT from company stock, IN to customer
-        TRANSFER: OUT from from_customer, IN to to_customer
-        """
         self.full_clean()
 
         if user and not self.created_by_id:
             self.created_by = user
-        self.save()  # persist normalized fields
+        self.save()  # ensure self.pk exists
 
         kg = dkg(self.qty_kg)
-        rate = int(self.rate_pkr)
-        ledger_dt = _ledger_dt_for(self.when)  # ← use the chosen 'when' date (important!)
+        ledger_dt = _ledger_dt_for(self.when)  # your helper using DateField 'when'
+
+        def upsert(customer, entry_type, delta, memo):
+            L.objects.update_or_create(
+                raw_txn=self,                  # <— key
+                customer=customer,             # <— key
+                type=entry_type,               # <— key
+                defaults=dict(
+                    order=None,
+                    receipt=None,
+                    date=ledger_dt,
+                    delta_kg=delta,
+                    material_type=self.material_type,
+                    memo=memo,
+                ),
+            )
 
         if self.kind == self.Kind.PURCHASE:
-            # PURCHASE (IN → company stock)
-            CustomerMaterialLedger.objects.create(
-                customer=self.to_customer, 
-                order=None, 
-                receipt=None, 
-                date=ledger_dt,
-                type=CustomerMaterialLedger.EntryType.IN, 
-                delta_kg=kg,
-                material_type=self.material_type,                                    # ← add
-                memo=f"Purchase from {self.supplier_name} - {self.material_type} · {self.qty_kg} KG",
+            upsert(
+                self.company_stock_customer(),
+                L.EntryType.IN,
+                kg,
+                f"RM TXN #{self.pk} · Purchase from {self.supplier_name} · {self.material_type} · {self.qty_kg} kg",
             )
 
         elif self.kind == self.Kind.SALE:
-            # OUT from company stock; IN to customer
-            comp = self.from_customer
-            CustomerMaterialLedger.objects.create(
-                customer=comp, order=None, receipt=None, date=ledger_dt,
-                type=CustomerMaterialLedger.EntryType.OUT, delta_kg=-kg,
-                material_type=self.material_type,                                    # ← add
-                memo=f"Sale to {self.to_customer.company_name} - {self.material_type} ·  {self.qty_kg} KG",
+            comp = self.company_stock_customer()
+            upsert(
+                comp,
+                L.EntryType.OUT,
+                -kg,
+                f"RM TXN #{self.pk} · Sale to {self.to_customer.company_name} · {self.material_type} · {self.qty_kg} kg",
             )
-            CustomerMaterialLedger.objects.create(
-            customer=self.to_customer, order=None, receipt=None, date=ledger_dt,
-            type=CustomerMaterialLedger.EntryType.IN, delta_kg=kg,
-            material_type=self.material_type,                                    # ← add
-            memo=f"From Company Stock {self.qty_kg} KG - {self.material_type}",
+            upsert(
+                self.to_customer,
+                L.EntryType.IN,
+                kg,
+                f"RM TXN #{self.pk} · From Company Stock · {self.material_type} · {self.qty_kg} kg",
             )
 
         else:  # TRANSFER
-            CustomerMaterialLedger.objects.create(
-                customer=self.from_customer, order=None, receipt=None, date=ledger_dt,
-                type=CustomerMaterialLedger.EntryType.OUT, delta_kg=-kg,
-                material_type=self.material_type,                                    # ← add
-                memo=f"Transfer → {self.to_customer.company_name} - {self.material_type} - {self.qty_kg} KG",
-        )
-            CustomerMaterialLedger.objects.create(
-                customer=self.to_customer, order=None, receipt=None, date=ledger_dt,
-                type=CustomerMaterialLedger.EntryType.IN, delta_kg=kg,
-                material_type=self.material_type,                                    # ← add
-                memo=f"Transfer ← {self.from_customer.company_name} - {self.material_type} - {self.qty_kg} KG",
+            upsert(
+                self.from_customer,
+                L.EntryType.OUT,
+                -kg,
+                f"RM TXN #{self.pk} · Transfer → {self.to_customer.company_name} · {self.material_type} · {self.qty_kg} kg",
+            )
+            upsert(
+                self.to_customer,
+                L.EntryType.IN,
+                kg,
+                f"RM TXN #{self.pk} · Transfer ← {self.from_customer.company_name} · {self.material_type} · {self.qty_kg} kg",
             )
 
         return self
