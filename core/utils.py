@@ -5,14 +5,16 @@ from django.utils import timezone
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Table, TableStyle
+from reportlab.platypus import Table, TableStyle, Paragraph
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib import colors
 from reportlab.lib.units import mm
 from datetime import date, datetime, timedelta
 from calendar import monthrange
 from django.db.models import Sum, Value, DecimalField, F, ExpressionWrapper
 from django.db.models.functions import Coalesce
-
+from xml.sax.saxutils import escape
 from core.models.common import money_int_pk
 from .utils_weight import dkg  # your Decimal quantizer
 # Models
@@ -56,6 +58,15 @@ style = TableStyle([
 
     ("ALIGN", (0, 0), (-1, -1), "CENTER"),
 ])
+cell_style = ParagraphStyle(
+    "cell",
+    fontName="Helvetica",
+    #fontSize=9,
+    leading=11,
+    wordWrap="CJK",   # allows wrapping even in long tokens like “2500.000KGTAPE”
+    spaceBefore=0,
+    spaceAfter=0,
+)
 # ----------------------------
 # Small drawing helpers
 # ----------------------------
@@ -325,18 +336,21 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
         rows_payments.append([str(getattr(p, "received_on", "") or ""), str(getattr(p, "method", "") or ""), notes or "—", pkr_str(amt)])
     rows_payments.append(["", "", "Total", pkr_str(payments_total)])
 
+    def P(txt):  # helper
+        return Paragraph(escape(str(txt or "—")), cell_style)
+
     # --- Material movement detail (both + and −) in range ---
     rows_receipts = []
     receipts_total = Decimal("0.000")
     ledger_entries = (
         CustomerMaterialLedger.objects
         .filter(customer=customer, date__range=(period_start, period_end))
-        #.exclude(order__isnull=False) ## To exclude the entries tied to orders.
+        .exclude(order__isnull=False) ## To exclude the entries tied to orders.
         .order_by("date", "id")
     )
     for rec in ledger_entries:
         qty = dkg(Decimal(rec.delta_kg or 0))
-        rows_receipts.append([rec.date.date().isoformat(), str(rec.memo or "—"), str(rec.material_type or "-"), f"{qty:,.3f}"])
+        rows_receipts.append([rec.date.date().isoformat(), P(rec.memo or "—"), P(rec.material_type or "-"), f"{qty:,.3f}"])
         receipts_total += qty
     rows_receipts = rows_receipts or [["—", "—", "—"]]
     if rows_receipts and rows_receipts[0][0] != "—":
@@ -468,7 +482,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.drawString(margin, y, "Material Movements (Period)")
     y -= 12
     receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
-    rec_base_cols = [90, 200, 100, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols))); rec_col_widths = [w * scale for w in rec_base_cols]
+    rec_base_cols = [90, 300, 50, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols))); rec_col_widths = [w * scale for w in rec_base_cols]
     t3 = Table(receipts_table, colWidths=rec_col_widths, repeatRows=1); t3.setStyle(style)
     tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
     if y - th < 90:
@@ -861,7 +875,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     y -= 12
 
     receipts_table = [["Date", "Notes / Reference", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
-    rec_base_cols = [90, 300, 100]
+    rec_base_cols = [90, 320, 100]
     scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols)))
     rec_col_widths = [w * scale for w in rec_base_cols]
 

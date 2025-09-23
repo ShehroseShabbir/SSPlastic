@@ -87,14 +87,29 @@ class CustomerMaterialLedger(models.Model):
     delta_kg = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0.000"))
     memo     = models.CharField(max_length=255, blank=True)
 
+    raw_txn = models.ForeignKey(
+        "core.RawMaterialTxn",  # adjust app label if different
+        null=True, blank=True,
+        on_delete=models.CASCADE,
+        related_name="ledger_rows",
+        help_text="Backlink to raw-material transaction (for idempotent writes).",
+    )
+
     class Meta:
         constraints = [
             UniqueConstraint(
                 fields=["order", "type"],
                 name="uniq_out_per_order",
                 condition=Q(type="OUT"),
-            )
+            ),
+            # NEW: at most one IN/OUT per raw_txn per customer
+            UniqueConstraint(
+                fields=["raw_txn", "customer", "type"],
+                name="uniq_per_rawtxn_customer_type",
+                condition=Q(raw_txn__isnull=False),
+            ),
         ]
+       
         verbose_name = "Ledger"
         verbose_name_plural = "Ledgers"
 
