@@ -33,16 +33,23 @@ def get_site_settings():
 
 @admin.register(SiteSettings)
 class SiteSettingsAdmin(admin.ModelAdmin):
-    list_display = ("company_name", "tax_label", "tax_rate")
+    list_display = ("company_name", "billing_theme", "company_address", "enable_negative_dana_charges")
     fieldsets = (
         ("Branding", {
-            "fields": ("company_name", "logo", "company_address")
+            "fields": ("company_name", "company_address" ,"logo")
+        }),
+        ("Billing", {
+            "fields": ("billing_theme","notes","bank_details",)
+        }),
+        ("Negative Dana Charge", {
+            "fields": (
+                "enable_negative_dana_charges",
+                "negative_dana_default_rate_pkr",
+                "negative_dana_label",
+            )
         }),
         ("Tax", {
             "fields": ("tax_label", "tax_rate")
-        }),
-        ("Banking (PDF footer)", {
-            "fields": ("notes","bank_details",)
         }),
         ("Email (optional overrides)", {
             "description": "Leave blank to use project settings.py EMAIL_* values.",

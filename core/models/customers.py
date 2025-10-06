@@ -31,7 +31,13 @@ class Customer(models.Model):
         default=0,
         help_text="Auto: carry + final orders − payments (int PKR)."
     )
-
+    # Per-customer override (optional)
+    charge_negative_dana = models.BooleanField(default=None, null=True, blank=True,
+        help_text="Override global toggle: True/False. Leave blank to use Site Settings.")
+    negative_dana_rate_pkr = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Override rate (PKR/kg). Leave blank to use Site Settings."
+    )
     @property
     def carry_remaining_pkr(self) -> int:
         """

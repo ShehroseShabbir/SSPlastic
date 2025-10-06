@@ -19,6 +19,7 @@ from core.models.common import money_int_pk
 from core.models.raw_material import BAG_WEIGHT_KG, RawMaterialPurchasePayment
 
 # ✅ remove the bad absolute import; use relative imports only
+from core.models.settings import SiteSettings
 from core.services.material_sync import sync_order_material_ledger
 from core.models import (
     Customer, Order, OrderItem, OrderRoll,
@@ -321,6 +322,9 @@ class CustomerAdmin(admin.ModelAdmin):
                 )
             },
         ),
+        ("Negative Dana Charge (Override)", {
+            "fields": ("charge_negative_dana", "negative_dana_rate_pkr"),
+        }),
     )
     search_fields = ("company_name", "contact_name", "phone", "email")
     ordering = ("company_name",)
@@ -1000,8 +1004,6 @@ class OrderAdmin(admin.ModelAdmin):
 # -------------------------
 # END ORDER
 # -------------------------
-
-
 
 # -------------------------
 # Expenses
