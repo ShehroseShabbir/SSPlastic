@@ -42,6 +42,18 @@ def pkr_str(val) -> str:
     """
     return f"Rs. {to_rupees_int(D(val)):,}"
 
+def _plain_text(x):
+    try:
+        from reportlab.platypus.paragraph import Paragraph as RLParagraph
+    except Exception:
+        RLParagraph = None
+    if RLParagraph and isinstance(x, RLParagraph):
+        try:
+            return x.getPlainText()
+        except Exception:
+            pass
+    return (str(x or "")).strip()
+
 # ---- Customer Billing Monthly ----------
 # Apply table style
 style = TableStyle([
@@ -194,6 +206,23 @@ def _statement_path(customer: Customer, year: int, month: int) -> Path:
     safe_name = "".join(ch for ch in customer.company_name if ch.isalnum() or ch in (" ", "_", "-")).strip()
     return base / f"Statement-{safe_name}-{year:04d}-{month:02d}.pdf"
 
+# ----------------------------
+# Theme helpers
+# ----------------------------
+def _get_billing_theme(ss, default="default"):
+    """
+    Read theme from SiteSettings.billing_theme (string).
+    Falls back to 'default' when missing.
+    Known values we handle here:
+      - 'default' (your current multi-section layout)
+      - 'compact_one_page' (new, fits like your photo)
+    """
+    try:
+        t = (getattr(ss, "billing_theme", None) or "").strip().lower()
+    except Exception:
+        t = ""
+    return t or default
+
 def _period_bounds(year: int, month: int):
     first = date(year, month, 1)
     last = date(year, month, monthrange(year, month)[1])
@@ -247,6 +276,224 @@ def _nice_range_label(start, end):
 
     return f"{_fmt(start)} → {_fmt(end)}"
 
+## NEGATIVE DANA HELPER
+def _neg_dana_config(customer, ss):
+    """
+    Returns (enabled: bool, rate_pkr: Decimal, label: str)
+    Priority:
+      - customer.charge_negative_dana if set (True/False) else ss.enable_negative_dana_charges
+      - rate: customer.negative_dana_rate_pkr if set else ss.negative_dana_default_rate_pkr
+    """
+    from decimal import Decimal as _D
+    enabled_global = bool(getattr(ss, "enable_negative_dana_charges", False))
+    enabled_cust = getattr(customer, "charge_negative_dana", None)
+    enabled = enabled_cust if enabled_cust is not None else enabled_global
+
+    rate = getattr(customer, "negative_dana_rate_pkr", None)
+    if rate is None:
+        rate = getattr(ss, "negative_dana_default_rate_pkr", _D("0"))
+    try:
+        rate = D(rate or 0)
+    except Exception:
+        rate = D(0)
+
+    label = getattr(ss, "negative_dana_label", "Dana Minus")
+    return bool(enabled), rate, str(label or "Dana Minus")
+
+# ----------------------------
+# Compact statement renderer (one page)
+# ----------------------------
+def _render_statement_compact(
+    *, pdf_path, ss, customer, period_label, orders_table_data, dana_rows,
+    opening_due_pkr, charges_period_pkr, payments_period_pkr,
+    payment_lines=None,                  # list[(left_text, int_amount_pkr_negative_or_positive)]
+    orders_qty_total=None,               # Decimal
+    previous_dana_kg=None,               # Decimal
+    dana_balance_kg=None,                # Decimal
+    company_title=None, user=None,
+    shortfall_kg=Decimal("0.000"), neg_rate=Decimal("0.00"),
+    neg_label="Dana Minus", neg_dana_charge_pkr=0,
+):
+    from reportlab.pdfgen import canvas
+    from reportlab.platypus import Table, TableStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader
+
+    payment_lines = payment_lines or []
+    orders_qty_total = orders_qty_total or Decimal("0.000")
+    previous_dana_kg = previous_dana_kg or Decimal("0.000")
+    dana_balance_kg  = dana_balance_kg  or Decimal("0.000")
+
+    c = canvas.Canvas(str(pdf_path), pagesize=A4)
+    W, H = A4
+    margin = 12 * mm
+    right_x = W - margin
+    top_y = H - margin
+    title = company_title or f"Statement-{customer.company_name}-{period_label}"
+    c.setTitle(title)
+
+    # Header (same as before) ...
+    logo_path = None
+    if ss and getattr(ss, "logo", None):
+        try: logo_path = ss.logo.path
+        except Exception: logo_path = None
+    if not logo_path:
+        lp = getattr(settings, "INVOICE_LOGO_PATH", ""); logo_path = str(lp) if lp else None
+
+    logo_w, logo_h = (32 * mm, 16 * mm)
+    if logo_path:
+        try: c.drawImage(ImageReader(logo_path), margin, top_y - logo_h, width=logo_w, height=logo_h,
+                         preserveAspectRatio=True, mask="auto")
+        except Exception: pass
+
+    company_name = (ss.company_name if ss and getattr(ss, "company_name", None)
+                    else getattr(settings, "COMPANY_NAME", "Your Company"))
+    company_addr_lines = (ss.company_address_list if ss and hasattr(ss, "company_address_list")
+                          else getattr(settings, "COMPANY_ADDRESS_LINES", []))
+    _draw_multiline_right(c, [company_name] + list(_as_lines(company_addr_lines)),
+                          right_x, top_y, leading=12, font="Helvetica", size=9.5)
+
+    title_y = top_y - (logo_h + 26 if logo_path else 46)
+    c.setFont("Helvetica-Bold", 18); c.drawCentredString(W/2, title_y, f"{customer.company_name}")
+    c.setFont("Helvetica", 11.5); c.drawCentredString(W/2, title_y - 16, f"Statement ({period_label})")
+    y = title_y - 26
+
+    # ----------------------------
+    # Invoices table (LEFT, full width) + Payments box (RIGHT)
+    # ----------------------------
+    c.setFont("Helvetica-Bold", 11.5)
+    c.drawString(margin, y, "Invoices")
+    y -= 10
+
+    # Scale columns to exactly fill avail width, then draw at left margin
+    avail = W - 2 * margin
+    inv_base = [72, 80, 48, 46, 78, 52, 75]  # Date, Inv, DC, Size, Qty, Rate, Amount
+    inv_scale = avail / float(sum(inv_base))
+    inv_col_widths = [w * inv_scale for w in inv_base]
+
+    t1 = Table(orders_table_data, colWidths=inv_col_widths, repeatRows=1)
+    t1_style = TableStyle(style.getCommands())  # start with your global style
+    # override alignment for columns: text left, numbers right
+    # (col 0..6) Qty=4, Rate=5, Amount=6 right aligned; others left
+    t1_style.add("ALIGN", (0, 1), (3, -1), "LEFT")
+    t1_style.add("ALIGN", (4, 1), (6, -1), "RIGHT")
+    t1.setStyle(t1_style)
+
+    inv_tw, inv_th = t1.wrapOn(c, avail, H)
+    # top of invoices table is current y; draw from there
+    t1.drawOn(c, margin, y - inv_th)
+    # remember the "top" of this block to align the right panel
+    invoices_top_y = y
+    y = y - inv_th - 8
+
+    # ----------------------------
+    # RIGHT: Making Balance + payments + Bill Amount  (as a Table → perfect alignment)
+    # ----------------------------
+       # ----------------------------
+    # RIGHT: Making Balance + Payments + Bill Amount  (aligned beside or below invoices)
+    # ----------------------------
+    box_w = 80 * mm
+    pay_cols = [box_w * 0.63, box_w * 0.07, box_w * 0.30]
+    pays_data = [["Making Balance", "", ""]]
+    pays_data.append(["Total Amount", "=", pkr_str(opening_due_pkr)])
+    # Optional negative Dana line
+    if shortfall_kg and (shortfall_kg > 0):
+        dana_text = f"{neg_label}: {shortfall_kg:,.3f} kg × {pkr_str(neg_rate)}"
+        dana_style = ParagraphStyle("dana_style", fontName="Helvetica", fontSize=9, leading=11)
+        dana_para = Paragraph(dana_text, dana_style)
+
+        pays_data.append([dana_para, "=", pkr_str(neg_dana_charge_pkr)])
+    for left_text, amt in (payment_lines or []):
+        pays_data.append([_plain_text(left_text), "=", pkr_str(amt)])
+
+    closing_due_pkr = (
+    int(opening_due_pkr)
+    + int(charges_period_pkr)
+    + int(neg_dana_charge_pkr)   # ✅ include the Dana Minus charge
+    - int(payments_period_pkr)
+)
+
+    pays_data.append(["Bill Amount", "", pkr_str(closing_due_pkr)])
+
+    t_pay = Table(pays_data, colWidths=pay_cols)
+    t_pay.setStyle(TableStyle([
+        ("GRID", (0, 1), (-1, -2), 0.5, colors.black),
+        ("BOX",  (0, 0), (-1, -1), 0.8, colors.black),
+        ("SPAN", (0, 0), (-1, 0)),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("ALIGN", (0, 1), (0, -1), "LEFT"),
+        ("ALIGN", (1, 1), (1, -1), "CENTER"),
+        ("ALIGN", (2, 1), (2, -1), "RIGHT"),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.black),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+    ]))
+
+    pay_tw, pay_th = t_pay.wrapOn(c, box_w, H)
+
+    # ✅ Draw it BELOW the invoice table, not beside it
+    y = y - pay_th - 15
+    pay_x = W - margin - box_w
+    pay_y = y
+    t_pay.drawOn(c, pay_x, pay_y)
+    y = pay_y - 20
+
+    # ----------------------------
+    # Dana Summary (LEFT, full width)
+    # ----------------------------
+    y = min(y, pay_y) - 12   # keep a nice gap under whichever block is lower
+
+    c.setFont("Helvetica-Bold", 11.5)
+    c.drawString(margin, y, "Dana Summary")
+    y -= 10
+
+    dana_base = [92, 260, 63]  # Date, Description, KG
+    dana_scale = avail / float(sum(dana_base))
+    dana_col_widths = [w * dana_scale for w in dana_base]
+
+    t_dana = Table(dana_rows, colWidths=dana_col_widths, repeatRows=1)
+    t_dana_style = TableStyle(style.getCommands())
+    t_dana_style.add("ALIGN", (0, 1), (1, -1), "LEFT")   # Date + Description left
+    t_dana_style.add("ALIGN", (2, 1), (2, -1), "RIGHT")  # KG right
+    t_dana.setStyle(t_dana_style)
+
+    dana_tw, dana_th = t_dana.wrapOn(c, avail, H)
+    t_dana.drawOn(c, margin, y - dana_th)
+    y = y - dana_th - 8
+
+    # ----------------------------
+    # Dana totals footer (LEFT)
+    # ----------------------------
+    foot_rows = [
+        ["Previous Dana",    f"{previous_dana_kg:,.3f}"],
+        ["Less Order Total", f"{orders_qty_total:,.3f}"],
+        ["Dana Balance",     f"{dana_balance_kg:,.3f} kg"],
+    ]
+    t_footer = Table(foot_rows, colWidths=[110, 90])
+    t_footer.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("ALIGN", (0, 0), (0, -1), "LEFT"),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.black),
+        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+    ]))
+    tfw, tfh = t_footer.wrapOn(c, avail, H)
+    t_footer.drawOn(c, margin, max(y - tfh, 30 * mm))
+    y = y - tfh - 6
+
+    # Optional notes then footer
+    if ss and (getattr(ss, "notes", "") or getattr(ss, "notes_list", None)):
+        y = _draw_notes_box(c, W, H, ss, y)
+    bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list"))
+                  else getattr(settings, "BANK_DETAILS_LINES", []))
+    _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+    c.save()
+
+
 
 def generate_customer_statement_range(customer_id: int, start_date: date, end_date: date, user=None) -> str:
     """
@@ -256,6 +503,9 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     # --- Setup & Period ---
     customer = Customer.objects.get(id=customer_id)
     ss = get_site_settings()
+
+      # === Choose theme ===
+    theme = _get_billing_theme(ss, default="default")
 
     first, last, period_start, period_end = _period_bounds_from_dates(start_date, end_date)
     day_before = first - timedelta(days=1)
@@ -272,6 +522,9 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     )
     carry_pkr = int(customer.previous_pending_balance_pkr or 0)
     opening_due_pkr = carry_pkr + charges_before_pkr - payments_before_pkr
+
+
+
 
     # --- Invoices in range (ALL non-draft) ---
     orders = (
@@ -303,8 +556,8 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
 
         total_qty  += qty_kg
         total_inv  += invoice_total
-        total_paid += paid
-        total_due  += due
+        #total_paid += paid
+        #total_due  += due
         charges_period_pkr += int(getattr(o, "grand_total_pkr", 0) or 0)
 
         rows_orders.append([
@@ -315,11 +568,11 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
             f"{qty_kg:,.3f}",
             pkr_str(rate),
             pkr_str(invoice_total),
-            pkr_str(paid),
-            pkr_str(due),
+            # pkr_str(paid),
+            # pkr_str(due),
         ])
 
-    rows_orders.append(["", "", "", "Totals", f"{total_qty:,.3f}", "", pkr_str(total_inv), pkr_str(total_paid), pkr_str(total_due)])
+    rows_orders.append(["", "", "", "Totals", f"{total_qty:,.3f}", "", pkr_str(total_inv)])
 
     # --- Payments in range ---
     payments_qs = Payment.objects.filter(customer=customer, received_on__range=(first, last)).order_by("received_on", "id")
@@ -356,7 +609,13 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     if rows_receipts and rows_receipts[0][0] != "—":
         rows_receipts.append(["", "Total", "",f"{dkg(receipts_total):,.3f}"])
 
-    closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) - int(payments_period_pkr)
+    closing_due_pkr = (
+    int(opening_due_pkr)
+    + int(charges_period_pkr)
+    #+ int(neg_dana_charge_pkr)   # ✅ include the Dana Minus charge
+    - int(payments_period_pkr)
+    )
+
 
     # --- Material balance summary (ledger only) for range ---
     KG  = DecimalField(max_digits=12, decimal_places=3)
@@ -390,6 +649,112 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
         ["Closing Balance (kg)", f"{dkg(closing_kg):,.3f}"],
     ]
 
+    # Build readable payment lines like: "12 May 2025 : Meezan Bank Slip #4037799  =  -Rs. 90,000"
+    payment_lines = []
+    for p in payments_qs:
+        bits = []
+        try:
+            bits.append(p.received_on.strftime("%d %b %Y"))
+        except Exception:
+            bits.append(str(p.received_on or ""))
+        if p.method:
+            bits.append(str(p.method))
+        if p.reference:
+            bits.append(f"Ref {p.reference}")
+        if p.notes:
+            bits.append(str(p.notes))
+        left = " : ".join([bits[0], " ".join(bits[1:]).strip()]) if len(bits) > 1 else bits[0]
+        payment_lines.append((left, -int(D(p.amount or 0))))  # negative in the display
+
+    # Quantities to show in Dana totals footer (compact)
+    orders_qty_total = dkg(total_qty)  # already accumulated while listing orders
+    previous_dana_kg = dkg(opening_kg + in_month_in_kg)  # previous + this month IN
+    dana_balance_kg  = dkg(previous_dana_kg - orders_qty_total)
+    
+
+        # === Negative Dana charge (if enabled and balance is negative) ===
+    neg_enabled, neg_rate, neg_label = _neg_dana_config(customer, ss)
+
+    # Use your period-closing balance (kg). For monthly you have 'closing_kg'.
+    # In compact helpers you also build 'dana_balance_kg'; both should match.
+    shortfall_kg = Decimal("0.000")
+
+    try:
+        # monthly version uses 'closing_kg'
+        shortfall_kg = dkg(-closing_kg) if closing_kg < 0 else Decimal("0.000")
+    except NameError:
+        # range/compact version: use 'dana_balance_kg' if available
+        if "dana_balance_kg" in locals():
+            shortfall_kg = dkg(-dana_balance_kg) if dana_balance_kg < 0 else Decimal("0.000")
+
+    neg_dana_charge_pkr = 0
+    show_neg_dana_row = False
+    if neg_enabled and shortfall_kg > 0 and neg_rate > 0:
+        # charge = kg * rate
+        neg_charge = round_to(shortfall_kg * neg_rate, 0)  # to nearest rupee
+        neg_dana_charge_pkr = int(neg_charge)
+        show_neg_dana_row = True
+
+    # Adjust the bill math: Bill Amount = opening + charges + neg_dana - payments
+    closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) + int(neg_dana_charge_pkr) - int(payments_period_pkr)
+
+    # Prepare Dana table rows for compact theme header names
+    # Dana table rows for compact theme (Date, Description, KG)
+    dana_table_rows = [["Date", "Description", "KG"]]
+    if rows_receipts and rows_receipts != [["—", "—", "—"]]:
+                # rows_receipts here are like: [date, Paragraph(memo), type, qty] OR the total row
+                for r in rows_receipts:
+                    # skip totals/blank rows
+                    if not r or r[0] in ("", None):
+                        continue
+                    if r[0] == "—":  # the placeholder row
+                        dana_table_rows.append(["—", "—", "—"])
+                        continue
+                    if len(r) >= 4:
+                        dt, memo, typ, qty = r[:4]
+                        memo_txt = _plain_text(memo)
+                        typ_txt  = _plain_text(typ)
+                        desc = (f"{memo_txt} · {typ_txt}").strip(" ·")
+                        dana_table_rows.append([dt, desc or "—", _plain_text(qty)])
+                    elif len(r) == 3:
+                        dt, memo, qty = r
+                        dana_table_rows.append([dt, _plain_text(memo), _plain_text(qty)])
+    else:
+            dana_table_rows.append(["—", "—", "—"])
+
+    if theme == "compact_one_page":
+        # remap orders table to compact columns: Date, Invoice #, DC #, Size, Qty(kg), Rate, Amount
+        compact_orders = [["Date", "Invoice #", "DC #", "Size", "Quantity (kg)", "Rate", "Amount"]]
+        for r in rows_orders:
+            if r and r[0] == "":  # totals row in your current build
+                compact_orders.append(["", "", "", "Totals", r[4], "", r[6]])
+            else:
+                # rows_orders currently indexes: [date, inv, dc, size, qty, rate, total]
+                compact_orders.append(r[:7])
+
+        pdf_path = _statement_path_range(customer, first, last)
+        _render_statement_compact(
+            pdf_path=pdf_path,
+            ss=ss,
+            customer=customer,
+            period_label=_nice_range_label(first, last),
+            orders_table_data=compact_orders,
+            dana_rows=dana_table_rows,
+            opening_due_pkr=opening_due_pkr,
+            charges_period_pkr=charges_period_pkr,
+            payments_period_pkr=payments_period_pkr,
+            payment_lines=payment_lines,                 # NEW
+            orders_qty_total=orders_qty_total,           # NEW
+            previous_dana_kg=previous_dana_kg,           # NEW
+            dana_balance_kg=dana_balance_kg,             # NEW
+            shortfall_kg=shortfall_kg,
+            neg_rate=neg_rate,
+            neg_label=neg_label,
+            neg_dana_charge_pkr=neg_dana_charge_pkr,
+            company_title=f"Statement-{customer.company_name}-{first.isoformat()}_to_{last.isoformat()}",
+            user=user,
+        )
+        return str(pdf_path)
     # --- PDF: header & layout (labels adjusted for date span) ---
     pdf_path = _statement_path_range(customer, first, last)
     c = canvas.Canvas(str(pdf_path), pagesize=A4)
@@ -442,7 +807,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, y, "Invoices (All)")
     y -= 12
-    orders_table_data = [["Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Invoice Total", "Paid", "Amount Due"]] + (rows_orders or [["—"] * 9])
+    orders_table_data = [["Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Invoice Total"]] + (rows_orders or [["—"] * 7])
     orders_base_cols = [70, 85, 50, 50, 85, 55, 80, 80, 80]
     avail = W - 2 * margin
     scale = min(1.0, avail / float(sum(orders_base_cols)))
@@ -514,12 +879,26 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     y -= 12
     closing_label = "Balance due (carry to next bill)" if closing_due_pkr >= 0 else "Advance on account (credit)"
     closing_value = abs(int(closing_due_pkr))
+    # summary_rows = [
+    #     [f"Opening balance (before {first.strftime('%b %Y')})", pkr_str(opening_due_pkr)],
+    #     ["+ Charges in period",                                 pkr_str(charges_period_pkr)],
+    #     if show_neg_dana_row:
+    #     summary_rows.extend([f"+ {neg_label}: {shortfall_kg:,.3f} kg × {pkr_str(neg_rate)}",
+    #                          pkr_str(neg_dana_charge_pkr)])
+    #     ["− Payments received in period",                       pkr_str(payments_period_pkr)],
+    #     [closing_label,                                         pkr_str(closing_value)],
+    # ]
     summary_rows = [
-        [f"Opening balance (before {first.strftime('%b %Y')})", pkr_str(opening_due_pkr)],
-        ["+ Charges in period",                                 pkr_str(charges_period_pkr)],
-        ["− Payments received in period",                       pkr_str(payments_period_pkr)],
-        [closing_label,                                         pkr_str(closing_value)],
+         [f"Opening balance (before {first.strftime('%b %Y')})", pkr_str(opening_due_pkr)],
+        ["+ Charges this month",                           pkr_str(charges_period_pkr)],
     ]
+    if show_neg_dana_row:
+        summary_rows.append([f"+ {neg_label}: {shortfall_kg:,.3f} kg × {pkr_str(neg_rate)}",
+                             pkr_str(neg_dana_charge_pkr)])
+    summary_rows.extend([
+        ["− Payments received this month",                 pkr_str(payments_period_pkr)],
+        [closing_label,                                    pkr_str(abs(int(closing_due_pkr)))],
+    ])
     sum_base_cols = [300, 140]; scale = min(1.0, (W - 2 * margin) / float(sum(sum_base_cols))); sum_col_widths = [w * scale for w in sum_base_cols]
     t_sum = Table(summary_rows, colWidths=sum_col_widths, repeatRows=0); t_sum.setStyle(style)
     tw, th = t_sum.wrapOn(c, W, H); x_center = (W - tw) / 2.0
@@ -550,12 +929,17 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
       • Table 2: Payments received during the month (date, method, notes/ref, amount).
       • Table 3: Material balance summary (Opening, IN, OUT, Closing).
     """
+
+    theme = _get_billing_theme(ss, default="default")
+
     # --- Setup & Period ---
     customer = Customer.objects.get(id=customer_id)
     ss = get_site_settings()
     first, last, period_start, period_end = _period_bounds(year, month)
      # --- Opening (before this month): carry + final invoices ≤ last_month_day − payments ≤ last_month_day ---
     day_before = first - timedelta(days=1)
+
+    
 
     # final/billable orders up to the day before this month
     charges_before_pkr = sum(
@@ -585,6 +969,37 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     total_due   = Decimal("0.00")
     charges_period_pkr = 0      # add
     payments_period_pkr = 0   # add
+
+        # === Negative Dana charge (if enabled and balance is negative) ===
+    neg_enabled, neg_rate, neg_label = _neg_dana_config(customer, ss)
+
+    # Use your period-closing balance (kg). For monthly you have 'closing_kg'.
+    # In compact helpers you also build 'dana_balance_kg'; both should match.
+    shortfall_kg = Decimal("0.000")
+
+    try:
+        # monthly version uses 'closing_kg'
+        shortfall_kg = dkg(-closing_kg) if closing_kg < 0 else Decimal("0.000")
+    except NameError:
+        # range/compact version: use 'dana_balance_kg' if available
+        if "dana_balance_kg" in locals():
+            shortfall_kg = dkg(-dana_balance_kg) if dana_balance_kg < 0 else Decimal("0.000")
+
+    neg_dana_charge_pkr = 0
+    show_neg_dana_row = False
+    if neg_enabled and shortfall_kg > 0 and neg_rate > 0:
+        # charge = kg * rate
+        neg_charge = round_to(shortfall_kg * neg_rate, 0)  # to nearest rupee
+        neg_dana_charge_pkr = int(neg_charge)
+        show_neg_dana_row = True
+
+    # Adjust the bill math: Bill Amount = opening + charges + neg_dana - payments
+    closing_due_pkr = (
+    int(opening_due_pkr)
+    + int(charges_period_pkr)
+    + int(neg_dana_charge_pkr)   # ✅ include the Dana Minus charge
+    - int(payments_period_pkr)
+)
 
 
     for o in orders:
@@ -680,7 +1095,93 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     if rows_receipts and rows_receipts[0][0] != "—":
         rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
 
-    closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) - int(payments_period_pkr)
+    closing_due_pkr = (
+    int(opening_due_pkr)
+    + int(charges_period_pkr)
+    + int(neg_dana_charge_pkr)   # ✅ include the Dana Minus charge
+    - int(payments_period_pkr)
+)
+
+
+    
+    # Dana table rows for compact theme (Date, Description, KG)
+       # Dana table rows for compact theme (Date, Description, KG)
+    dana_table_rows = [["Date", "Description", "KG"]]
+    if rows_receipts and rows_receipts != [["—", "—", "—"]]:
+        for r in rows_receipts:
+            if not r or r[0] in ("", None):
+                continue
+            if r[0] == "—":
+                dana_table_rows.append(["—", "—", "—"])
+                continue
+            if len(r) >= 4:
+                dt, memo, typ, qty = r[:4]
+                desc = (f"{_plain_text(memo)} · {_plain_text(typ)}").strip(" ·")
+                dana_table_rows.append([dt, desc or "—", _plain_text(qty)])
+            elif len(r) == 3:
+                dt, memo, qty = r
+                dana_table_rows.append([dt, _plain_text(memo), _plain_text(qty)])
+    else:
+        dana_table_rows.append(["—", "—", "—"])
+
+    if theme == "compact_one_page":
+        # remap orders columns to compact
+        compact_orders = [["Date", "Invoice #", "DC #", "Size", "Quantity (kg)", "Rate", "Amount"]]
+        for r in rows_orders:
+            if r and r[0] == "":
+                compact_orders.append(["", "", "", "Totals", r[4], "", r[6]])
+            else:
+                compact_orders.append(r[:7])
+    # For compact theme’s right-side “payments list”
+    # Build readable payment lines like: "12 May 2025 : Meezan Bank Slip #4037799  =  -Rs. 90,000"
+        payment_lines = []
+        for p in payments_qs:
+            bits = []
+            try:
+                bits.append(p.received_on.strftime("%d %b %Y"))
+            except Exception:
+                bits.append(str(p.received_on or ""))
+            if p.method:
+                bits.append(str(p.method))
+            if p.reference:
+                bits.append(f"Ref {p.reference}")
+            if p.notes:
+                bits.append(str(p.notes))
+            left = " : ".join([bits[0], " ".join(bits[1:]).strip()]) if len(bits) > 1 else bits[0]
+            payment_lines.append((left, -int(D(p.amount or 0))))  # negative in the display
+
+        # Quantities to show in Dana totals footer (compact)
+        orders_qty_total = dkg(total_qty)  # already accumulated while listing orders
+        previous_dana_kg = dkg(opening_kg + in_month_in_kg)  # previous + this month IN
+        dana_balance_kg  = dkg(previous_dana_kg - orders_qty_total)
+        # period label: "August 2025"
+        import calendar
+        month_name = calendar.month_name[month]
+        period_label = f"{month_name} {year}"
+        pdf_path = _statement_path(customer, year, month)
+
+        _render_statement_compact(
+            pdf_path=pdf_path,
+            ss=ss,
+            customer=customer,
+            period_label=period_label,
+            orders_table_data=compact_orders,
+            dana_rows=dana_table_rows,
+            opening_due_pkr=opening_due_pkr,
+            charges_period_pkr=charges_period_pkr,
+            payments_period_pkr=payments_period_pkr,
+            payment_lines=payment_lines,                 # NEW
+            orders_qty_total=orders_qty_total,           # NEW
+            previous_dana_kg=previous_dana_kg,           # NEW
+            dana_balance_kg=dana_balance_kg,             # NEW
+            shortfall_kg=shortfall_kg,
+            neg_rate=neg_rate,
+            neg_label=neg_label,
+            neg_dana_charge_pkr=neg_dana_charge_pkr,
+            company_title=f"Statement-{customer.company_name}-{year:04d}-{month:02d}",
+            user=user,
+        )
+        return str(pdf_path)
 
     # ===========================
     # MATERIAL BALANCE SUMMARY — LEDGER ONLY
@@ -927,12 +1428,24 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     closing_label = "Balance due (carry to next bill)" if closing_due_pkr >= 0 else "Advance on account (credit)"
     closing_value  = abs(int(closing_due_pkr))
 
+    # summary_rows = [
+    #     [f"Opening balance (before {month_name} {year})", pkr_str(opening_due_pkr)],
+    #     ["+ Charges this month",                                  pkr_str(charges_period_pkr)],
+    #     ["− Payments received this month",                         pkr_str(payments_period_pkr)],
+    #     [closing_label,                                           pkr_str(closing_value)],
+    # ]
     summary_rows = [
         [f"Opening balance (before {month_name} {year})", pkr_str(opening_due_pkr)],
-        ["+ Charges this month",                                  pkr_str(charges_period_pkr)],
-        ["− Payments received this month",                         pkr_str(payments_period_pkr)],
-        [closing_label,                                           pkr_str(closing_value)],
+        ["+ Charges this month",                           pkr_str(charges_period_pkr)],
     ]
+    if show_neg_dana_row:
+        summary_rows.append([f"+ {neg_label}: {shortfall_kg:,.3f} kg × {pkr_str(neg_rate)}",
+                             pkr_str(neg_dana_charge_pkr)])
+    summary_rows.extend([
+        ["− Payments received this month",                 pkr_str(payments_period_pkr)],
+        [closing_label,                                    pkr_str(abs(int(closing_due_pkr)))],
+    ])
+    
     sum_base_cols = [300, 140]
     scale = min(1.0, (W - 2 * margin) / float(sum(sum_base_cols)))
     sum_col_widths = [w * scale for w in sum_base_cols]

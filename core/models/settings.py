@@ -1,7 +1,32 @@
 from decimal import Decimal
 from django.db import models
 
-class SiteSettings(models.Model):
+class SiteSettings(models.Model): 
+    # Themes
+
+    BILLING_THEMES = [
+        ("default", "Default (Detailed)"),
+        ("compact_one_page", "Compact One Page"),
+        # add more later if needed
+    ]
+
+    billing_theme = models.CharField(
+        max_length=50,
+        choices=BILLING_THEMES,
+        default="default",
+        help_text="Choose a template for invoices and monthly statements."
+    )
+    # Charge for negative Dana/material
+    enable_negative_dana_charges = models.BooleanField(default=False,
+        help_text="If ON, negative (short) Dana in a billing period will be charged.")
+    negative_dana_default_rate_pkr = models.DecimalField(
+        max_digits=10, decimal_places=2, default=0,
+        help_text="Default rate (PKR per kg) used when a customer has a negative Dana."
+    )
+    negative_dana_label = models.CharField(
+        max_length=64, default="Dana Minus",
+        help_text="Label used on the invoice (e.g., 'Dana Minus')."
+    )
     # Branding / company info
     company_name = models.CharField(max_length=255, blank=True, default="")
     company_address = models.TextField(blank=True, default="")  # multi-line
