@@ -502,29 +502,14 @@ class CustomerAdmin(admin.ModelAdmin):
         return resp
     
     def preview_ledger(self, request, pk):
-        from datetime import timedelta
-        today = now().date()
-        preset = request.GET.get("preset", "month")
-
-        # Work out range
-        if preset == "30":
-            start_date = today - timedelta(days=30)
-            end_date = today
-        elif preset == "60":
-            start_date = today - timedelta(days=60)
-            end_date = today
-        elif preset == "90":
-            start_date = today - timedelta(days=90)
-            end_date = today
-        elif preset == "120":
-            start_date = today - timedelta(days=120)
-            end_date = today
-        elif preset == "year":
-            start_date = date(today.year, 1, 1)
-            end_date = date(today.year, 12, 31)
-        else:  # month
+        # Use the unified parser (supports month/year/rolling/custom)
+        try:
+            start_date, end_date, _preset, _y, _m = self._compute_range(request)
+        except Exception:
+            # Safe fallback = current month
+            today = timezone.localdate()
             start_date = date(today.year, today.month, 1)
-            end_date = today
+            end_date = date(today.year, today.month, monthrange(today.year, today.month)[1])
 
         from core.utils import generate_customer_ledger_pdf
         pdf_path = generate_customer_ledger_pdf(pk, start_date, end_date, user=request.user)
