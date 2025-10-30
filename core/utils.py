@@ -1,36 +1,46 @@
 from pathlib import Path
 from decimal import Decimal
+from datetime import date, datetime, timedelta
+
 from django.conf import settings
 from django.utils import timezone
+from django.db.models import Sum, Value, DecimalField
+from django.db.models.functions import Coalesce
+
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-from reportlab.platypus import Table, TableStyle, Paragraph
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
 from reportlab.lib import colors
 from reportlab.lib.units import mm
-from datetime import date, datetime, timedelta
-from calendar import monthrange
-from django.db.models import Sum, Value, DecimalField, F, ExpressionWrapper
-from django.db.models.functions import Coalesce
-from xml.sax.saxutils import escape
-from core.models.common import money_int_pk
-from .utils_weight import dkg  # your Decimal quantizer
-# Models
-from .models import Order, MaterialReceipt, Customer, CustomerMaterialLedger  # reuse the single dkg
-from .models_ar import Payment
-from core.models_ar import Payment, FINAL_STATES  # add this
+from reportlab.platypus import Table, TableStyle, Paragraph
+from reportlab.lib.styles import ParagraphStyle
 
-# Money helpers (your new utilities)
-from .utils_money import D, to_rupees_int, round_to
+# Project models (pick ONE Payment class)
+from .models import Order, Customer, CustomerMaterialLedger
+from .models_ar import Payment, FINAL_STATES
 
-# ---- Optional: pull branding/settings from the singleton SiteSettings ----
+# Money/weight helpers
+from .utils_money import D, round_to, to_rupees_int
+from .utils_weight import dkg
+
+# Central PDF helpers
+from .utils_pdf import (
+    pkr_str, BASE_TABLE_STYLE, PSTYLE_NOZWSP, p_wrap,
+    cell_text, auto_col_widths, build_auto_table,
+    draw_multiline_left, draw_multiline_right,
+    get_billing_theme, period_bounds, period_bounds_from_dates,
+    statement_path, nice_range_label, _as_lines, escape, stringWidth
+)
+
+# Site settings
 try:
     from .utils_settings import get_site_settings
 except Exception:
-    def get_site_settings():
-        return None
+    def get_site_settings(): return None
+
+
+
+
 
 # ----------------------------
 # Formatting helpers (display)
@@ -79,6 +89,21 @@ cell_style = ParagraphStyle(
     spaceBefore=0,
     spaceAfter=0,
 )
+# Paragraph style that DOES NOT add zero-width breaks (no tofu)
+_PSTYLE_NOZWSP = ParagraphStyle(
+    "nozwsp",
+    fontName="Helvetica",
+    fontSize=9,
+    leading=11,
+    wordWrap="CJK",
+    spaceBefore=0,
+    spaceAfter=0,
+)
+
+def _p_wrap_nozwsp(text) -> Paragraph:
+    """Wrap text for statement tables without inserting ZWSP."""
+    return Paragraph(escape("" if text == "" else (str(text) if text is not None else "—")), _PSTYLE_NOZWSP)
+
 # ----------------------------
 # Small drawing helpers
 # ----------------------------
@@ -206,6 +231,107 @@ def _statement_path(customer: Customer, year: int, month: int) -> Path:
     safe_name = "".join(ch for ch in customer.company_name if ch.isalnum() or ch in (" ", "_", "-")).strip()
     return base / f"Statement-{safe_name}-{year:04d}-{month:02d}.pdf"
 
+def _soft_break(s: str) -> str:
+    """Add zero-width breakpoints so long tokens can wrap (DC refs, words-with-dashes)."""
+    if s is None:
+        return ""
+    s = str(s)
+    for ch in (":", "/", "-", "—", "#", ".", "_"):
+        s = s.replace(ch, ch + "\u200b")
+    return s
+
+def _P_wrap(text, *, font="Helvetica", size=9, leading=11):
+    # Paragraph that wraps even if there are long tokens
+    return Paragraph(_soft_break(text or "—"), ParagraphStyle(
+        "wrap", fontName=font, fontSize=size, leading=leading, wordWrap="CJK",
+        spaceBefore=0, spaceAfter=0))
+# Paragraph style that DOES NOT add zero-width breaks (no tofu)
+_PSTYLE_NOZWSP = ParagraphStyle(
+    "nozwsp",
+    fontName="Helvetica",
+    fontSize=9,
+    leading=11,
+    wordWrap="CJK",
+    spaceBefore=0,
+    spaceAfter=0,
+)
+def _p_wrap_nozwsp(text) -> Paragraph:
+    """Wrap text for statement tables without inserting ZWSP."""
+    return Paragraph(escape("" if text == "" else (str(text) if text is not None else "—")), _PSTYLE_NOZWSP)
+
+def _auto_col_widths(rows, avail_width_pt: float, *, font="Helvetica", size=9, pad=6, min_pt=42):
+    if not rows:
+        return []
+    ncols = len(rows[0])
+    widest = [0.0] * ncols
+    for r in rows:
+        for j, cell in enumerate(r):
+            s = _cell_text(cell)          # <-- use robust extractor
+            w = stringWidth(s, font, size) + 2*pad
+            if w > widest[j]:
+                widest[j] = w
+    widest = [max(min_pt, w) for w in widest]
+    total = sum(widest)
+    if total <= 0:
+        return [avail_width_pt / ncols] * ncols
+    scale = min(1.0, avail_width_pt / total)
+    widths = [w * scale for w in widest]
+    diff = avail_width_pt - sum(widths)
+    if abs(diff) > 0.01:
+        bump = diff / ncols
+        widths = [w + bump for w in widths]
+    return widths
+
+def _cell_text(cell: object) -> str:
+    """Flatten Paragraphs and None safely; keep empty strings as '' (not '—')."""
+    if cell == "":
+        return ""
+    if hasattr(cell, "getPlainText"):
+        return cell.getPlainText()
+    if cell is None:
+        return "—"
+    return str(cell)
+
+def _build_auto_table(
+    data,
+    *,
+    text_cols: set[int],
+    num_cols: set[int],
+    avail_width: float,
+    repeat_header: bool = True,
+    base_style: TableStyle | None = None,
+):
+    """Auto-fit table with wrapping on text columns (no ZWSP), numeric right-aligned."""
+    # Wrap text columns only for DATA rows
+    wrapped = []
+    for i, row in enumerate(data):
+        if i == 0:  # header stays plain
+            wrapped.append([_cell_text(c) for c in row])
+            continue
+        new_row = []
+        for j, cell in enumerate(row):
+            if j in text_cols:
+                new_row.append(_p_wrap_nozwsp(cell))   # <-- no-ZWSP wrapper
+            else:
+                new_row.append(_cell_text(cell))       # <-- keep '' blank, flatten Paragraphs
+        wrapped.append(new_row)
+
+    # Measure widths with plain strings (no Paragraph)
+    measure_rows = [[_cell_text(c) for c in row] for row in data]
+    col_widths = _auto_col_widths(measure_rows, avail_width_pt=avail_width, font="Helvetica", size=9, pad=6, min_pt=42)
+
+    t = Table(wrapped, colWidths=col_widths, repeatRows=(1 if repeat_header else 0))
+    t_style = TableStyle(base_style.getCommands() if base_style else [])
+    t_style.add("VALIGN", (0, 0), (-1, -1), "TOP")
+    t_style.add("LEFTPADDING",  (0, 0), (-1, -1), 4)
+    t_style.add("RIGHTPADDING", (0, 0), (-1, -1), 4)
+    t_style.add("ALIGN", (0, 1), (-1, -1), "LEFT")
+    if num_cols:
+        t_style.add("ALIGN", (min(num_cols), 1), (max(num_cols), -1), "RIGHT")
+    t.setStyle(t_style)
+
+    tw, th = t.wrapOn(None, avail_width, 0)
+    return t, tw, th
 # ----------------------------
 # Theme helpers
 # ----------------------------
@@ -313,6 +439,8 @@ def _render_statement_compact(
     company_title=None, user=None,
     shortfall_kg=Decimal("0.000"), neg_rate=Decimal("0.00"),
     neg_label="Dana Minus", neg_dana_charge_pkr=0,
+    neg_dana_note=None,   # <— add this
+
 ):
     from reportlab.pdfgen import canvas
     from reportlab.platypus import Table, TableStyle
@@ -484,7 +612,13 @@ def _render_statement_compact(
     tfw, tfh = t_footer.wrapOn(c, avail, H)
     t_footer.drawOn(c, margin, max(y - tfh, 30 * mm))
     y = y - tfh - 6
-
+    if neg_dana_note:
+        note_style = ParagraphStyle("neg_note", fontName="Helvetica-Oblique",
+                                    fontSize=9.5, leading=12, textColor=colors.darkgray)
+        note_para = Paragraph(neg_dana_note, note_style)
+        tw, th = note_para.wrap(W - 2*margin, H)
+        note_para.drawOn(c, margin, y - th)
+        y = y - th - 8
     # Optional notes then footer
     if ss and (getattr(ss, "notes", "") or getattr(ss, "notes_list", None)):
         y = _draw_notes_box(c, W, H, ss, y)
@@ -572,7 +706,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
             # pkr_str(due),
         ])
 
-    rows_orders.append(["", "", "", "Totals", f"{total_qty:,.3f}", "", pkr_str(total_inv)])
+    rows_orders.append(["", "", "", "Total", f"{total_qty:,.3f}", "", pkr_str(total_inv)])
 
     # --- Payments in range ---
     payments_qs = Payment.objects.filter(customer=customer, received_on__range=(first, last)).order_by("received_on", "id")
@@ -607,7 +741,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
         receipts_total += qty
     rows_receipts = rows_receipts or [["—", "—", "—"]]
     if rows_receipts and rows_receipts[0][0] != "—":
-        rows_receipts.append(["", "Total", "",f"{dkg(receipts_total):,.3f}"])
+        rows_receipts.append(["", "Total", "", f"{dkg(receipts_total):,.3f}"])
 
     closing_due_pkr = (
     int(opening_due_pkr)
@@ -698,36 +832,55 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     # Adjust the bill math: Bill Amount = opening + charges + neg_dana - payments
     closing_due_pkr = int(opening_due_pkr) + int(charges_period_pkr) + int(neg_dana_charge_pkr) - int(payments_period_pkr)
 
-    # Prepare Dana table rows for compact theme header names
-    # Dana table rows for compact theme (Date, Description, KG)
+    # ---- NOTE LINE (to show on the PDF) ----
+    neg_dana_note = None
+    if show_neg_dana_row and neg_dana_charge_pkr > 0:
+        neg_dana_note = f"{neg_label} amount added in Bill"
+
+    # Build Dana Summary table from ledger rows we actually show
     dana_table_rows = [["Date", "Description", "KG"]]
+    real_rows = 0
+    total_kg = Decimal("0.000")
+
+    def _as_dec_kg(s: str) -> Decimal:
+        from decimal import InvalidOperation
+        try:
+            return dkg(Decimal((s or "").replace(",", "").strip()))
+        except (InvalidOperation, ValueError):
+            return Decimal("0.000")
+
     if rows_receipts and rows_receipts != [["—", "—", "—"]]:
-                # rows_receipts here are like: [date, Paragraph(memo), type, qty] OR the total row
-                for r in rows_receipts:
-                    # skip totals/blank rows
-                    if not r or r[0] in ("", None):
-                        continue
-                    if r[0] == "—":  # the placeholder row
-                        dana_table_rows.append(["—", "—", "—"])
-                        continue
-                    if len(r) >= 4:
-                        dt, memo, typ, qty = r[:4]
-                        memo_txt = _plain_text(memo)
-                        typ_txt  = _plain_text(typ)
-                        desc = (f"{memo_txt} · {typ_txt}").strip(" ·")
-                        dana_table_rows.append([dt, desc or "—", _plain_text(qty)])
-                    elif len(r) == 3:
-                        dt, memo, qty = r
-                        dana_table_rows.append([dt, _plain_text(memo), _plain_text(qty)])
+        for r in rows_receipts:
+            # skip placeholders and old totals
+            if not r or r[0] in ("", None, "—"):
+                continue
+
+            if len(r) >= 4:
+                dt, memo, typ, qty = r[:4]
+                memo_txt = _plain_text(memo)
+                typ_txt  = _plain_text(typ)
+                desc = (f"{memo_txt} · {typ_txt}").strip(" ·")
+                dana_table_rows.append([str(dt), desc or "—", _plain_text(qty)])
+                total_kg += _as_dec_kg(_plain_text(qty))
+                real_rows += 1
+            elif len(r) == 3:
+                dt, memo, qty = r
+                dana_table_rows.append([str(dt), _plain_text(memo), _plain_text(qty)])
+                total_kg += _as_dec_kg(_plain_text(qty))
+                real_rows += 1
     else:
-            dana_table_rows.append(["—", "—", "—"])
+        dana_table_rows.append(["—", "—", "—"])
+
+    # ✅ Always append our own Total row if we added any data rows
+    if real_rows > 0:
+        dana_table_rows.append(["", "Total", f"{dkg(total_kg):,.3f}"])
 
     if theme == "compact_one_page":
         # remap orders table to compact columns: Date, Invoice #, DC #, Size, Qty(kg), Rate, Amount
         compact_orders = [["Date", "Invoice #", "DC #", "Size", "Quantity (kg)", "Rate", "Amount"]]
         for r in rows_orders:
             if r and r[0] == "":  # totals row in your current build
-                compact_orders.append(["", "", "", "Totals", r[4], "", r[6]])
+                compact_orders.append(["", "", "", "Total", r[4], "", r[6]])
             else:
                 # rows_orders currently indexes: [date, inv, dc, size, qty, rate, total]
                 compact_orders.append(r[:7])
@@ -751,6 +904,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
             neg_rate=neg_rate,
             neg_label=neg_label,
             neg_dana_charge_pkr=neg_dana_charge_pkr,
+            neg_dana_note=neg_dana_note,   # <-- add this
             company_title=f"Statement-{customer.company_name}-{first.isoformat()}_to_{last.isoformat()}",
             user=user,
         )
@@ -807,18 +961,20 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, y, "Invoices (All)")
     y -= 12
-    orders_table_data = [["Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Invoice Total"]] + (rows_orders or [["—"] * 7])
-    orders_base_cols = [70, 85, 50, 50, 85, 55, 80, 80, 80]
-    avail = W - 2 * margin
-    scale = min(1.0, avail / float(sum(orders_base_cols)))
-    orders_col_widths = [w * scale for w in orders_base_cols]
-    t1 = Table(orders_table_data, colWidths=orders_col_widths, repeatRows=1); t1.setStyle(style)
-    tw, th = t1.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    orders_table_data = [["Date", "Invoice #", "DC #", "Size", "Total Qty (kg)", "Rate", "Invoice Total"]] + (rows_orders if rows_orders else [["—"] * 7])
+    t1, tw, th = _build_auto_table(
+    orders_table_data,
+    text_cols={1, 3},          # Invoice #, Size
+    num_cols={4, 5, 6},        # Qty, Rate, Total
+    avail_width=W - 2*margin,
+    base_style=style,
+)
     if y - th < 90:
         bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
         _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
         c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    t1.drawOn(c, x_center, y - th); y = y - th - 30
+    t1.drawOn(c, margin, y - th)
+    y = y - th - 30
 
     # Table 2: Payments (Period)
     if y < 120:
@@ -829,14 +985,19 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.drawString(margin, y, "Payments Received (Period)")
     y -= 12
     payments_table = [["Date", "Method", "Notes / Reference", "Amount"]] + (rows_payments or [["—"] * 4])
-    pay_base_cols = [90, 90, 260, 80]; scale = min(1.0, (W - 2 * margin) / float(sum(pay_base_cols))); pay_col_widths = [w * scale for w in pay_base_cols]
-    t2 = Table(payments_table, colWidths=pay_col_widths, repeatRows=1); t2.setStyle(style)
-    tw, th = t2.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    t2, tw, th = _build_auto_table(
+    payments_table,
+    text_cols={2},             # wrap Notes
+    num_cols={3},              # amount right
+    avail_width=W - 2*margin,
+    base_style=style,
+    )
     if y - th < 90:
         bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
         _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
         c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    t2.drawOn(c, x_center, y - th); y = y - th - 30
+    t2.drawOn(c, margin, y - th)
+    y = y - th - 30
 
     # Table 3: Material detail (Period)
     if y < 120:
@@ -847,14 +1008,19 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.drawString(margin, y, "Material Movements (Period)")
     y -= 12
     receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
-    rec_base_cols = [90, 300, 50, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(rec_base_cols))); rec_col_widths = [w * scale for w in rec_base_cols]
-    t3 = Table(receipts_table, colWidths=rec_col_widths, repeatRows=1); t3.setStyle(style)
-    tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    t3, tw, th = _build_auto_table(
+        receipts_table,
+        text_cols={3},             # wrap Notes
+        num_cols={1},              # qty right
+        avail_width=W - 2*margin,
+        base_style=style,
+    )
     if y - th < 90:
         bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
         _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
         c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    t3.drawOn(c, x_center, y - th); y = y - th - 30
+    t3.drawOn(c, margin, y - th)
+    y = y - th - 30
 
     # Material Balance Summary
     if y < 120:
@@ -867,11 +1033,53 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     mat_base_cols = [220, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(mat_base_cols))); mat_col_widths = [w * scale for w in mat_base_cols]
     t3 = Table(rows_mat_balance, colWidths=mat_col_widths, repeatRows=0); t3.setStyle(style)
     tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+    
     if y - th < 90:
         bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
         _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
         c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    t3.drawOn(c, x_center, y - th); y = y - th - 30
+    # ONLY if the negative Dana note should show
+
+    t3.drawOn(c, x_center, y - th) 
+    
+# --- If a negative Dana note should appear ---
+    if neg_dana_note:
+
+        # Define the paragraph style
+        note_style = ParagraphStyle(
+            "neg_note",
+            fontName="Helvetica-Oblique",
+            fontSize=8.5,
+            leading=12,
+            textColor=colors.black,
+            alignment=0,  # left-align text within cell
+        )
+
+        # Create a 2-column table (left blank, right text)
+        note_tbl = Table(
+            [[ "", Paragraph(neg_dana_note, note_style) ]],
+            colWidths=mat_col_widths,  # same as the Material Balance table
+        )
+
+        note_tbl.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (1, 0), "LEFT"),
+            ("VALIGN", (0, 0), (-1, 0), "TOP"),
+            ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING",   (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
+            ("BORDER", (0, 0), (-1, -1), 0, colors.white),
+        ]))
+
+        # Wrap and draw directly beneath the material balance summary table
+        tw_note, th_note = note_tbl.wrapOn(c, sum(mat_col_widths), H)
+        note_tbl.drawOn(c, x_center, y - th - th_note)
+        y = y - th - th_note - 12  # move cursor below note
+
+    else:
+        # Normal spacing if no note
+        y = y - th - 30
+
 
     # Bill Summary (range)
     c.setFont("Helvetica-Bold", 12)
@@ -1001,6 +1209,11 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     - int(payments_period_pkr)
 )
 
+# --- Step 1: Optional paragraph line if Dana charge applied ---
+    neg_dana_note = None
+    if show_neg_dana_row and neg_dana_charge_pkr > 0:
+        # e.g., "Dana Minus amount added in Bill"
+        neg_dana_note = f"{neg_label} amount added in Bill"
 
     for o in orders:
         qty_kg = dkg(getattr(o, "target_total_kg", 0) or 0)
@@ -1035,7 +1248,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
 
     # Totals row for invoices
     rows_orders.append([
-        "", "", "", "Totals",
+        "", "", "", "Total",
         f"{total_qty:,.3f}",
         "",
         pkr_str(total_inv),
@@ -1102,34 +1315,50 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     - int(payments_period_pkr)
 )
 
-
-    
-    # Dana table rows for compact theme (Date, Description, KG)
-       # Dana table rows for compact theme (Date, Description, KG)
+    # Build Dana Summary table from ledger rows we actually show
     dana_table_rows = [["Date", "Description", "KG"]]
+    real_rows = 0
+    total_kg = Decimal("0.000")
+
+    def _as_dec_kg(s: str) -> Decimal:
+        from decimal import InvalidOperation
+        try:
+            return dkg(Decimal((s or "").replace(",", "").strip()))
+        except (InvalidOperation, ValueError):
+            return Decimal("0.000")
+
     if rows_receipts and rows_receipts != [["—", "—", "—"]]:
         for r in rows_receipts:
-            if not r or r[0] in ("", None):
+            # skip placeholders and old totals
+            if not r or r[0] in ("", None, "—"):
                 continue
-            if r[0] == "—":
-                dana_table_rows.append(["—", "—", "—"])
-                continue
+
             if len(r) >= 4:
                 dt, memo, typ, qty = r[:4]
-                desc = (f"{_plain_text(memo)} · {_plain_text(typ)}").strip(" ·")
-                dana_table_rows.append([dt, desc or "—", _plain_text(qty)])
+                memo_txt = _plain_text(memo)
+                typ_txt  = _plain_text(typ)
+                desc = (f"{memo_txt} · {typ_txt}").strip(" ·")
+                dana_table_rows.append([str(dt), desc or "—", _plain_text(qty)])
+                total_kg += _as_dec_kg(_plain_text(qty))
+                real_rows += 1
             elif len(r) == 3:
                 dt, memo, qty = r
-                dana_table_rows.append([dt, _plain_text(memo), _plain_text(qty)])
+                dana_table_rows.append([str(dt), _plain_text(memo), _plain_text(qty)])
+                total_kg += _as_dec_kg(_plain_text(qty))
+                real_rows += 1
     else:
         dana_table_rows.append(["—", "—", "—"])
+
+    # ✅ Always append our own Total row if we added any data rows
+    if real_rows > 0:
+        dana_table_rows.append(["", "Total", f"{dkg(total_kg):,.3f}"])
 
     if theme == "compact_one_page":
         # remap orders columns to compact
         compact_orders = [["Date", "Invoice #", "DC #", "Size", "Quantity (kg)", "Rate", "Amount"]]
         for r in rows_orders:
             if r and r[0] == "":
-                compact_orders.append(["", "", "", "Totals", r[4], "", r[6]])
+                compact_orders.append(["", "", "", "Total", r[4], "", r[6]])
             else:
                 compact_orders.append(r[:7])
     # For compact theme’s right-side “payments list”
@@ -1178,6 +1407,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
             neg_rate=neg_rate,
             neg_label=neg_label,
             neg_dana_charge_pkr=neg_dana_charge_pkr,
+            neg_dana_note=neg_dana_note,                # Note if negative
             company_title=f"Statement-{customer.company_name}-{year:04d}-{month:02d}",
             user=user,
         )
@@ -1418,7 +1648,24 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
         _draw_page_header(c, W, H, ss)
         y = H - margin
     t3.drawOn(c, x_center, y - th)
-    y = y - th - 30
+    # Draw the Dana note snug under the table (only if applied)
+    if neg_dana_note:   # ensure you set this earlier
+        note_style = ParagraphStyle(
+            "neg_note",
+            fontName="Helvetica-Oblique",
+            fontSize=9.5,
+            leading=12,
+            textColor=colors.black,
+        )
+        note_para = Paragraph(neg_dana_note, note_style)
+        tw_note, th_note = note_para.wrap(W - 2*margin, H)
+        # place right below the table (3pt gap)
+        note_para.drawOn(c, margin, y - th - th_note - 3)
+        # advance cursor just past the note (small gap after)
+        y = y - th - th_note - 15
+    else:
+        # no note -> keep the usual spacing
+        y = y - th - 30
     # === Bill Summary (this month) ===
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, y, f"Bill Summary ({month_name} {year})")
@@ -1986,13 +2233,43 @@ def generate_customer_ledger_pdf(customer_id, start_date, end_date, user=None) -
     y = (title_y - 50)  # start below the subtitle
 
     # Column widths (tuned for A4, similar density to your statement tables)
-    base_cols = [85, 45, 50, 55, 70, 75, 75, 120]  # Date, DC, Size, Micron, Treat, Recv, Issued, Customer
+    # --- Auto-fit widths + safe wrapping (no ZWSP in numeric-ish columns) ---
     avail = W - 2 * margin
-    scale = min(1.0, avail / float(sum(base_cols)))
-    col_widths = [w * scale for w in base_cols]
 
-    t = Table(rows, colWidths=col_widths, repeatRows=1)
-    t.setStyle(style)  # <<< reuse your global TableStyle
+    # Columns: 0 Date, 1 DC #, 2 Size, 3 Micron, 4 Treatment, 5 Receipt, 6 Issued, 7 Customer
+    text_cols = {4, 7}        # wrap only text-heavy columns
+    num_cols  = {5, 6}        # right align these
+
+    wrap_style = ParagraphStyle("wrap", fontName="Helvetica", fontSize=9, leading=11, wordWrap="LTR")
+
+    rows_wrapped = []
+    for i, r in enumerate(rows):
+        if i == 0:   # header row unchanged
+            rows_wrapped.append(r)
+            continue
+        new = []
+        for j, cell in enumerate(r):
+            if j in text_cols:
+                new.append(Paragraph(escape(str(cell) or "—"), wrap_style))
+            else:
+                new.append(str(cell) if cell not in (None, "") else "—")
+        rows_wrapped.append(new)
+
+    # measure with plain text (no ZWSP)
+    measure_rows = []
+    for r in rows:
+        measure_rows.append([str(c) if c not in (None, "") else "—" for c in r])
+
+    col_widths = _auto_col_widths(measure_rows, avail_width_pt=avail, font="Helvetica", size=9, pad=6, min_pt=38)
+
+    t = Table(rows_wrapped, colWidths=col_widths, repeatRows=1)
+    t_style = TableStyle(style.getCommands())
+    t_style.add("VALIGN", (0, 0), (-1, -1), "TOP")
+    t_style.add("LEFTPADDING",  (0, 0), (-1, -1), 4)
+    t_style.add("RIGHTPADDING", (0, 0), (-1, -1), 4)
+    t_style.add("ALIGN", (0, 1), (-1, -1), "LEFT")   # default left
+    t_style.add("ALIGN", (5, 1), (6, -1), "RIGHT")   # numeric right
+    t.setStyle(t_style)
 
     tw, th = t.wrapOn(c, W, H)
     x_center = (W - tw) / 2.0
