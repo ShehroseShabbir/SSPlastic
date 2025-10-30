@@ -4,6 +4,24 @@
 {# Scoped CSS just for our statement widget #}
 {% block extrahead %}
   {{ block.super }}
+
+  {# Flatpickr CSS/JS — swap to {% static %} if you prefer bundling #}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+
+  <style>
+    .statement-tools { /* (your existing styles) */ }
+    /* Calendar trigger chip */
+    .range-trigger {
+      display: inline-flex; align-items:center; gap:.5rem;
+      padding:6px 10px; border:1px solid var(--hairline-color,#dcdcdc);
+      border-radius: 6px; cursor: pointer; background: var(--darkened-bg,#fafafa);
+      font-size: 13px; line-height: 1.2;
+    }
+    .range-trigger[aria-disabled="true"] { opacity:.6; pointer-events:none; }
+    .range-trigger .label { color: var(--body-quiet-color,#666); }
+  </style>
+
   <style>
     .statement-tools {
       display: inline-flex;
@@ -77,6 +95,8 @@
         color: var(--body-quiet-color, #aaa);
       }
     }
+    .field[hidden] { display: none !important; }
+
   </style>
 {% endblock %}
 
@@ -86,35 +106,52 @@
   <li>
     <form action="" method="get" class="statement-tools" style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap;">
       <label for="id-preset">Period</label>
-      <span class="select-wrap">
-        <select id="id-preset" name="preset">
-          <option value="month" {% if default_preset == "month" %}selected{% endif %}>Current Month</option>
-          <option value="30"   {% if default_preset == "30" %}selected{% endif %}>Last 30 days</option>
-          <option value="60"   {% if default_preset == "60" %}selected{% endif %}>Last 60 days</option>
-          <option value="90"   {% if default_preset == "90" %}selected{% endif %}>Last 90 days</option>
-          <option value="120"  {% if default_preset == "120" %}selected{% endif %}>Last 120 days</option>
-          <option value="year" {% if default_preset == "year" %}selected{% endif %}>This Year</option>
-        </select>
-      </span>
+        <span class="select-wrap">
+          <select id="id-preset" name="preset">
+            <option value="month"  {% if default_preset == "month" %}selected{% endif %}>Current Month</option>
+            <option value="30"     {% if default_preset == "30" %}selected{% endif %}>Last 30 days</option>
+            <option value="60"     {% if default_preset == "60" %}selected{% endif %}>Last 60 days</option>
+            <option value="90"     {% if default_preset == "90" %}selected{% endif %}>Last 90 days</option>
+            <option value="120"    {% if default_preset == "120" %}selected{% endif %}>Last 120 days</option>
+            <option value="year"   {% if default_preset == "year" %}selected{% endif %}>This Year</option>
+            <option value="custom" {% if default_preset == "custom" %}selected{% endif %}>Custom…</option>
+          </select>
+        </span>
 
-      <label for="id-year">Year</label>
-      <span class="select-wrap">
-        <select id="id-year" name="year">
-          {% for y in years %}
-            <option value="{{ y }}" {% if y == default_year %}selected{% endif %}>{{ y }}</option>
-          {% endfor %}
-        </select>
-      </span>
+        <span class="field group-year">
+          <label for="id-year">Year</label>
+          <span class="select-wrap">
+            <select id="id-year" name="year">
+              {% for y in years %}
+                <option value="{{ y }}" {% if y == default_year %}selected{% endif %}>{{ y }}</option>
+              {% endfor %}
+            </select>
+          </span>
+        </span>
 
-      <label for="id-month">Month</label>
-      <span class="select-wrap">
-        <select id="id-month" name="month">
-          {% for mval, mname in months %}
-            <option value="{{ mval }}" {% if mval == default_month %}selected{% endif %}>{{ mname }}</option>
-          {% endfor %}
-        </select>
-      </span>
+        <span class="field group-month">
+          <label for="id-month">Month</label>
+          <span class="select-wrap">
+            <select id="id-month" name="month">
+              {% for v, n in months %}
+                <option value="{{ v }}" {% if v == default_month %}selected{% endif %}>{{ n }}</option>
+              {% endfor %}
+            </select>
+          </span>
+        </span>
 
+        <span class="field group-custom">
+          <span id="range-trigger" class="range-trigger" role="button" aria-disabled="true">
+            <span class="label">Custom Range</span>
+            <span id="range-label">
+              {% if default_preset == "custom" and default_start and default_end %}
+                {{ default_start|date:"d MMM Y" }} → {{ default_end|date:"d MMM Y" }}
+              {% else %}Select…{% endif %}
+            </span>
+          </span>
+          <input type="hidden" id="id-start" name="start" value="{{ default_start|date:'Y-m-d' }}">
+          <input type="hidden" id="id-end"   name="end"   value="{{ default_end|date:'Y-m-d' }}">
+        </span>
       <!-- Preview Statement -->
       <button type="submit"
               class="button"
@@ -140,32 +177,125 @@
     </form>
   </li>
 
-  <script>
-    (function() {
-      const preset = document.getElementById('id-preset');
-      const yearSel = document.getElementById('id-year');
-      const monthSel = document.getElementById('id-month');
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    const preset     = document.getElementById('id-preset');
+    const yearWrap   = document.querySelector('.group-year');
+    const monthWrap  = document.querySelector('.group-month');
+    const customWrap = document.querySelector('.group-custom');
 
-      function toggleSelectors() {
-        const p = preset.value;
-        // Month: enable year + month
-        if (p === 'month') {
-          yearSel.disabled = false;
-          monthSel.disabled = false;
-        // Year: enable year only
-        } else if (p === 'year') {
-          yearSel.disabled = true;   // optional: you can allow changing year here if you want
-          monthSel.disabled = true;
-        // Rolling windows: disable both
-        } else {
-          yearSel.disabled = true;
-          monthSel.disabled = true;
+    const yearSel  = document.getElementById('id-year');
+    const monthSel = document.getElementById('id-month');
+    const trig     = document.getElementById('range-trigger');
+    const label    = document.getElementById('range-label');
+    const startInp = document.getElementById('id-start');
+    const endInp   = document.getElementById('id-end');
+    const form     = preset.closest('form');
+
+    // Safety: flatpickr loaded?
+    if (typeof flatpickr === 'undefined') {
+      console.error('Flatpickr not loaded.');
+      return;
+    }
+
+    // Ensure calendar overlays admin chrome
+    const zfix = document.createElement('style');
+    zfix.textContent = '.flatpickr-calendar{z-index:9999!important;}';
+    document.head.appendChild(zfix);
+
+    let fp = null; // lazy instance
+
+    function ensurePicker() {
+      if (fp) return fp;
+
+      // Hidden input for flatpickr – we’ll position by the trigger element
+      const ghost = document.createElement('input');
+      ghost.type = 'text';
+      ghost.style.position = 'absolute';
+      ghost.style.left = '-9999px';
+      trig.parentNode.insertBefore(ghost, trig.nextSibling);
+
+      fp = flatpickr(ghost, {
+        mode: 'range',
+        dateFormat: 'Y-m-d',
+        clickOpens: false,
+        appendTo: document.body,
+        positionElement: trig, // <- anchor to the visible trigger
+        defaultDate: (startInp.value && endInp.value) ? [startInp.value, endInp.value] : null,
+        onOpen(_, __, instance) {
+          // If trigger was hidden before, force re-anchoring on open
+          instance.config.positionElement = trig;
+        },
+        onChange(selected, _str, instance) {
+          if (selected.length === 2) {
+            const toISO   = d => instance.formatDate(d, 'Y-m-d');
+            const toHuman = d => instance.formatDate(d, 'd M Y');
+            startInp.value = toISO(selected[0]);
+            endInp.value   = toISO(selected[1]);
+            label.textContent = `${toHuman(selected[0])} → ${toHuman(selected[1])}`;
+          }
+        }
+      });
+
+      return fp;
+    }
+
+    function show(el, on) { el.toggleAttribute('hidden', !on); }
+    function disable(el, on){ el.disabled = on; el.style.opacity = on ? .6 : 1; }
+
+    function toggleGroups() {
+      const p = preset.value;
+      const isMonth  = p === 'month';
+      const isYear   = p === 'year';
+      const isCustom = p === 'custom';
+
+      // Visibility
+      show(yearWrap,  isMonth || isYear);
+      show(monthWrap, isMonth);
+      show(customWrap,isCustom);
+
+      // Disabled
+      disable(yearSel,  !(isMonth || isYear));
+      disable(monthSel, !isMonth);
+
+      // Activate/deactivate custom trigger
+      trig.setAttribute('aria-disabled', isCustom ? 'false' : 'true');
+      trig.tabIndex = isCustom ? 0 : -1;
+
+      // Lazy init when first shown (prevents “no open” issue)
+      if (isCustom) ensurePicker();
+    }
+
+    // Open on click (only when enabled)
+    trig.addEventListener('click', function () {
+      if (trig.getAttribute('aria-disabled') === 'true') return;
+      ensurePicker().open();
+    });
+
+    // Optional: open immediately when switching to Custom
+    preset.addEventListener('change', function () {
+      toggleGroups();
+      if (preset.value === 'custom') {
+        // give layout a tick before opening so element is visible
+        setTimeout(() => ensurePicker().open(), 0);
+      }
+    });
+
+    // Validate custom on submit
+    form.addEventListener('submit', function(e) {
+      if (preset.value === 'custom') {
+        if (!startInp.value || !endInp.value) {
+          e.preventDefault();
+          alert('Please pick a start and end date.');
         }
       }
-      preset.addEventListener('change', toggleSelectors);
-      toggleSelectors(); // initialize
-    })();
-  </script>
+    });
+
+    // Initial state
+    toggleGroups();
+  });
+</script>
+
 {% endblock %}
 
 

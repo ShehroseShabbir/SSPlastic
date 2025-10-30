@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 from django.contrib import admin, messages
-from django.urls import path, reverse,NoReverseMatch
+from django.urls import path, reverse
 from django import forms
 from django.core.exceptions import ValidationError
 from django.http import FileResponse, HttpResponseRedirect, HttpResponseBadRequest
@@ -9,12 +9,10 @@ from django.shortcuts import redirect, get_object_or_404, render
 from django.db.models import Sum, F, Value, ExpressionWrapper, DecimalField, Q,F, IntegerField
 from django.db.models.functions import Coalesce
 from django.utils.timezone import now
-from django.template.response import TemplateResponse
+from django.utils import timezone
 from pathlib import Path
 from decimal import Decimal
 from calendar import month_name, monthrange
-from django.db import transaction
-from core.admin_forms.raw_material import PurchaseForm, SellForm, TransferForm
 from core.models.common import money_int_pk
 from core.models.raw_material import BAG_WEIGHT_KG, RawMaterialPurchasePayment
 
@@ -332,30 +330,50 @@ class CustomerAdmin(admin.ModelAdmin):
     def _compute_range(self, request):
         """
         Returns (start_date, end_date, preset, year, month) using:
-          - preset=month -> uses year/month selects
-          - 30/60/90/120 -> last N days (to today)
-          - year -> Jan 1 ... Dec 31 of selected year
+        - preset=month -> uses year/month selects
+        - 30/60/90/120 -> last N days (inclusive, ending today)
+        - year -> Jan 1 ... Dec 31 of selected year
+        - custom -> uses start/end (YYYY-MM-DD)
         """
-        today = date.today()
-        preset = request.GET.get("preset", "month")  # "month", "30","60","90","120","year"
+        today = timezone.localdate()
+        preset = (request.GET.get("preset") or "month").lower()
 
-        # defaults from today
-        y = int(request.GET.get("year", today.year))
-        m = int(request.GET.get("month", today.month))
+        # defaults from today (still returned for consistency)
+        y = int(request.GET.get("year") or today.year)
+        m = int(request.GET.get("month") or today.month)
+
+        if preset == "custom":
+            start_str = request.GET.get("start")
+            end_str   = request.GET.get("end")
+            try:
+                start = date.fromisoformat(start_str) if start_str else None
+                end   = date.fromisoformat(end_str) if end_str else None
+            except Exception:
+                start = end = None
+            if not start or not end:
+                raise ValueError("Invalid period preset: custom requires 'start' and 'end' (YYYY-MM-DD).")
+            if start > end:
+                start, end = end, start
+            return start, end, preset, y, m
 
         if preset == "month":
             start = date(y, m, 1)
             end = date(y, m, monthrange(y, m)[1])
-        elif preset in {"30", "60", "90", "120"}:
-            days = int(preset)
-            end = today
-            start = today - timedelta(days=days)
-        elif preset == "year":
+            return start, end, preset, y, m
+
+        if preset == "year":
             start = date(y, 1, 1)
             end = date(y, 12, 31)
-        else:
-            raise ValueError("Invalid period preset")
-        return start, end, preset, y, m
+            return start, end, preset, y, m
+
+        if preset in {"30", "60", "90", "120"}:
+            days = int(preset)
+            end = today
+            # inclusive: e.g. "30" => last 30 days incl. today
+            start = today - timedelta(days=days - 1)
+            return start, end, preset, y, m
+
+        raise ValueError("Invalid period preset")
     
     # ---------- URLs ----------
     def get_urls(self):
