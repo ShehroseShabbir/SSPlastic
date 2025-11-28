@@ -28,6 +28,7 @@ from core.models import (
 from core.models.raw_material import RawMaterialTxn, SupplierPayment, RawMaterialPurchasePayment
 from core.services.purchase_pdf import generate_rm_purchase_statement
 from core.services.signals_billing import propagate_carry_forward
+from core.utils_billing import compute_customer_balance_as_of
 from core.utils_money import to_rupees_int
 from core.utils_weight import D, dkg
 
@@ -400,6 +401,12 @@ class CustomerAdmin(admin.ModelAdmin):
         ]
         return my_urls + urls
     
+    #Live Balance
+    @property
+    def pending_balance_live_pkr(self):
+        """Live balance using the same math as billing PDFs."""
+        return compute_customer_balance_as_of(self, timezone.localdate())
+    
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         return qs.annotate(
@@ -432,12 +439,10 @@ class CustomerAdmin(admin.ModelAdmin):
 
     @admin.display(description="Pending / Credit (PKR)")
     def pending_display(self, obj):
-        val = getattr(obj, "pending_balance_pkr", None) or obj.pending_balance_live_pkr
-        try:
-            n = int(val or 0)
-        except (TypeError, ValueError):
-            n = 0
+        n = compute_customer_balance_as_of(obj)  # always live
         return f"PKR {n:,}" if n >= 0 else f"PKR {abs(n):,} (credit)"
+    
+    
 
     # ----- Statement preview/download helpers -----
     def _parse_period(self, request):
