@@ -302,23 +302,37 @@ def _build_auto_table(
     base_style: TableStyle | None = None,
 ):
     """Auto-fit table with wrapping on text columns (no ZWSP), numeric right-aligned."""
+    if not data:
+        return Table([[]]), 0, 0
+
+    last_idx = len(data) - 1
+
     # Wrap text columns only for DATA rows
     wrapped = []
     for i, row in enumerate(data):
         if i == 0:  # header stays plain
             wrapped.append([_cell_text(c) for c in row])
             continue
+
         new_row = []
         for j, cell in enumerate(row):
-            if j in text_cols:
-                new_row.append(_p_wrap_nozwsp(cell))   # <-- no-ZWSP wrapper
+            # ✅ For LAST ROW: keep text cells as plain strings (so "Total" shows in white)
+            if j in text_cols and i != last_idx:
+                new_row.append(_p_wrap_nozwsp(cell))
             else:
-                new_row.append(_cell_text(cell))       # <-- keep '' blank, flatten Paragraphs
+                new_row.append(_cell_text(cell))
         wrapped.append(new_row)
 
     # Measure widths with plain strings (no Paragraph)
     measure_rows = [[_cell_text(c) for c in row] for row in data]
-    col_widths = _auto_col_widths(measure_rows, avail_width_pt=avail_width, font="Helvetica", size=9, pad=6, min_pt=42)
+    col_widths = _auto_col_widths(
+        measure_rows,
+        avail_width_pt=avail_width,
+        font="Helvetica",
+        size=9,
+        pad=6,
+        min_pt=42,
+    )
 
     t = Table(wrapped, colWidths=col_widths, repeatRows=(1 if repeat_header else 0))
     t_style = TableStyle(base_style.getCommands() if base_style else [])
@@ -332,6 +346,7 @@ def _build_auto_table(
 
     tw, th = t.wrapOn(None, avail_width, 0)
     return t, tw, th
+
 # ----------------------------
 # Theme helpers
 # ----------------------------
@@ -729,19 +744,35 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     # --- Material movement detail (both + and −) in range ---
     rows_receipts = []
     receipts_total = Decimal("0.000")
+
     ledger_entries = (
         CustomerMaterialLedger.objects
         .filter(customer=customer, date__range=(period_start, period_end))
-        .exclude(order__isnull=False) ## To exclude the entries tied to orders.
+        .exclude(order__isnull=False)  # skip order-tied entries
         .order_by("date", "id")
     )
+
     for rec in ledger_entries:
         qty = dkg(Decimal(rec.delta_kg or 0))
-        rows_receipts.append([rec.date.date().isoformat(), P(rec.memo or "—"), P(rec.material_type or "-"), f"{qty:,.3f}"])
+        rows_receipts.append([
+            rec.date.date().isoformat(),   # Date
+            rec.memo or "—",               # Notes / Reference  (plain text)
+            rec.material_type or "-",      # Type
+            f"{qty:,.3f}",                 # Qty (kg)
+        ])
         receipts_total += qty
-    rows_receipts = rows_receipts or [["—", "—", "—"]]
-    if rows_receipts and rows_receipts[0][0] != "—":
-        rows_receipts.append(["", "Total", "", f"{dkg(receipts_total):,.3f}"])
+
+    if not rows_receipts:
+        # placeholder row: 4 columns, same as header
+        rows_receipts = [["—", "—", "—", "—"]]
+    else:
+        # final Total row: 4 columns
+        rows_receipts.append([
+            "",                             # Date
+            "",                        # label
+            "Total",                             # Type
+            f"{dkg(receipts_total):,.3f}",  # Qty total
+        ])
 
     closing_due_pkr = (
     int(opening_due_pkr)
@@ -1007,11 +1038,12 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, y, "Material Movements (Period)")
     y -= 12
-    receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + (rows_receipts or [["—"] * 3])
+    receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + rows_receipts
+
     t3, tw, th = _build_auto_table(
         receipts_table,
-        text_cols={3},             # wrap Notes
-        num_cols={1},              # qty right
+        text_cols={1},   # Notes / Reference column wraps
+        num_cols={3},    # Qty (kg) right-aligned
         avail_width=W - 2*margin,
         base_style=style,
     )
@@ -1304,9 +1336,9 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
         ])
         receipts_total += qty
 
-    rows_receipts = rows_receipts or [["—", "—", "—"]]
+    rows_receipts = rows_receipts or [["—", "—", "—", "-"]]
     if rows_receipts and rows_receipts[0][0] != "—":
-        rows_receipts.append(["", "Total", f"{dkg(receipts_total):,.3f}"])
+        rows_receipts.append(["", "Total", "", f"{dkg(receipts_total):,.3f}"])
 
     closing_due_pkr = (
     int(opening_due_pkr)
