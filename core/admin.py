@@ -323,7 +323,17 @@ class CustomerAdmin(admin.ModelAdmin):
         ),
         ("Negative Dana Charge (Override)", {
             "fields": ("charge_negative_dana", "negative_dana_rate_pkr"),
+
         }),
+        ("Statement / Billing Preferences", {
+            "fields": (
+                "is_cash_customer",
+                "statement_theme",
+                "show_payments_on_statement",
+                "show_material_on_statement",
+            ),
+        }),
+        
     )
     search_fields = ("company_name", "contact_name", "phone", "email")
     ordering = ("company_name",)

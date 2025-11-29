@@ -350,18 +350,24 @@ def _build_auto_table(
 # ----------------------------
 # Theme helpers
 # ----------------------------
-def _get_billing_theme(ss, default="default"):
+def _get_billing_theme(ss, customer=None, default="default"):
     """
-    Read theme from SiteSettings.billing_theme (string).
-    Falls back to 'default' when missing.
-    Known values we handle here:
-      - 'default' (your current multi-section layout)
-      - 'compact_one_page' (new, fits like your photo)
+    1) If customer has statement_theme set, use that.
+    2) Else fall back to SiteSettings.billing_theme
+    3) Else use 'default'
     """
+    # customer override
+    if customer is not None:
+        ct = (getattr(customer, "statement_theme", "") or "").strip().lower()
+        if ct:
+            return ct
+
+    # site-wide setting
     try:
         t = (getattr(ss, "billing_theme", None) or "").strip().lower()
     except Exception:
         t = ""
+
     return t or default
 
 def _period_bounds(year: int, month: int):
@@ -583,57 +589,57 @@ def _render_statement_compact(
     pay_y = y
     t_pay.drawOn(c, pay_x, pay_y)
     y = pay_y - 20
+    if getattr(customer, "show_material_on_statement", True):
+        # ----------------------------
+        # Dana Summary (LEFT, full width)
+        # ----------------------------
+        y = min(y, pay_y) - 12   # keep a nice gap under whichever block is lower
 
-    # ----------------------------
-    # Dana Summary (LEFT, full width)
-    # ----------------------------
-    y = min(y, pay_y) - 12   # keep a nice gap under whichever block is lower
+        c.setFont("Helvetica-Bold", 11.5)
+        c.drawString(margin, y, "Dana Summary")
+        y -= 10
 
-    c.setFont("Helvetica-Bold", 11.5)
-    c.drawString(margin, y, "Dana Summary")
-    y -= 10
+        dana_base = [92, 260, 63]  # Date, Description, KG
+        dana_scale = avail / float(sum(dana_base))
+        dana_col_widths = [w * dana_scale for w in dana_base]
 
-    dana_base = [92, 260, 63]  # Date, Description, KG
-    dana_scale = avail / float(sum(dana_base))
-    dana_col_widths = [w * dana_scale for w in dana_base]
+        t_dana = Table(dana_rows, colWidths=dana_col_widths, repeatRows=1)
+        t_dana_style = TableStyle(style.getCommands())
+        t_dana_style.add("ALIGN", (0, 1), (1, -1), "LEFT")   # Date + Description left
+        t_dana_style.add("ALIGN", (2, 1), (2, -1), "RIGHT")  # KG right
+        t_dana.setStyle(t_dana_style)
 
-    t_dana = Table(dana_rows, colWidths=dana_col_widths, repeatRows=1)
-    t_dana_style = TableStyle(style.getCommands())
-    t_dana_style.add("ALIGN", (0, 1), (1, -1), "LEFT")   # Date + Description left
-    t_dana_style.add("ALIGN", (2, 1), (2, -1), "RIGHT")  # KG right
-    t_dana.setStyle(t_dana_style)
+        dana_tw, dana_th = t_dana.wrapOn(c, avail, H)
+        t_dana.drawOn(c, margin, y - dana_th)
+        y = y - dana_th - 8
 
-    dana_tw, dana_th = t_dana.wrapOn(c, avail, H)
-    t_dana.drawOn(c, margin, y - dana_th)
-    y = y - dana_th - 8
-
-    # ----------------------------
-    # Dana totals footer (LEFT)
-    # ----------------------------
-    foot_rows = [
-        ["Previous Dana",    f"{previous_dana_kg:,.3f}"],
-        ["Less Order Total", f"{orders_qty_total:,.3f}"],
-        ["Dana Balance",     f"{dana_balance_kg:,.3f} kg"],
-    ]
-    t_footer = Table(foot_rows, colWidths=[110, 90])
-    t_footer.setStyle(TableStyle([
-        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
-        ("ALIGN", (0, 0), (0, -1), "LEFT"),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ("BACKGROUND", (0, -1), (-1, -1), colors.black),
-        ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
-    ]))
-    tfw, tfh = t_footer.wrapOn(c, avail, H)
-    t_footer.drawOn(c, margin, max(y - tfh, 30 * mm))
-    y = y - tfh - 6
-    if neg_dana_note:
-        note_style = ParagraphStyle("neg_note", fontName="Helvetica-Oblique",
-                                    fontSize=9.5, leading=12, textColor=colors.darkgray)
-        note_para = Paragraph(neg_dana_note, note_style)
-        tw, th = note_para.wrap(W - 2*margin, H)
-        note_para.drawOn(c, margin, y - th)
-        y = y - th - 8
+        # ----------------------------
+        # Dana totals footer (LEFT)
+        # ----------------------------
+        foot_rows = [
+            ["Previous Dana",    f"{previous_dana_kg:,.3f}"],
+            ["Less Order Total", f"{orders_qty_total:,.3f}"],
+            ["Dana Balance",     f"{dana_balance_kg:,.3f} kg"],
+        ]
+        t_footer = Table(foot_rows, colWidths=[110, 90])
+        t_footer.setStyle(TableStyle([
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+            ("ALIGN", (0, 0), (0, -1), "LEFT"),
+            ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+            ("BACKGROUND", (0, -1), (-1, -1), colors.black),
+            ("TEXTCOLOR", (0, -1), (-1, -1), colors.white),
+        ]))
+        tfw, tfh = t_footer.wrapOn(c, avail, H)
+        t_footer.drawOn(c, margin, max(y - tfh, 30 * mm))
+        y = y - tfh - 6
+        if neg_dana_note:
+            note_style = ParagraphStyle("neg_note", fontName="Helvetica-Oblique",
+                                        fontSize=9.5, leading=12, textColor=colors.darkgray)
+            note_para = Paragraph(neg_dana_note, note_style)
+            tw, th = note_para.wrap(W - 2*margin, H)
+            note_para.drawOn(c, margin, y - th)
+            y = y - th - 8
     # Optional notes then footer
     if ss and (getattr(ss, "notes", "") or getattr(ss, "notes_list", None)):
         y = _draw_notes_box(c, W, H, ss, y)
@@ -654,7 +660,7 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
     ss = get_site_settings()
 
       # === Choose theme ===
-    theme = _get_billing_theme(ss, default="default")
+    theme = _get_billing_theme(ss, customer=customer ,default="default")
 
     first, last, period_start, period_end = _period_bounds_from_dates(start_date, end_date)
     day_before = first - timedelta(days=1)
@@ -1006,111 +1012,111 @@ def generate_customer_statement_range(customer_id: int, start_date: date, end_da
         c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
     t1.drawOn(c, margin, y - th)
     y = y - th - 30
-
-    # Table 2: Payments (Period)
-    if y < 120:
-        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
-        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, y, "Payments Received (Period)")
-    y -= 12
-    payments_table = [["Date", "Method", "Notes / Reference", "Amount"]] + (rows_payments or [["—"] * 4])
-    t2, tw, th = _build_auto_table(
-    payments_table,
-    text_cols={2},             # wrap Notes
-    num_cols={3},              # amount right
-    avail_width=W - 2*margin,
-    base_style=style,
-    )
-    if y - th < 90:
-        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
-        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    t2.drawOn(c, margin, y - th)
-    y = y - th - 30
-
-    # Table 3: Material detail (Period)
-    if y < 120:
-        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
-        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, y, "Material Movements (Period)")
-    y -= 12
-    receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + rows_receipts
-
-    t3, tw, th = _build_auto_table(
-        receipts_table,
-        text_cols={1},   # Notes / Reference column wraps
-        num_cols={3},    # Qty (kg) right-aligned
+    if getattr(customer, "show_payments_on_statement", True):
+        # Table 2: Payments (Period)
+        if y < 120:
+            bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+            _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+            c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margin, y, "Payments Received (Period)")
+        y -= 12
+        payments_table = [["Date", "Method", "Notes / Reference", "Amount"]] + (rows_payments or [["—"] * 4])
+        t2, tw, th = _build_auto_table(
+        payments_table,
+        text_cols={2},             # wrap Notes
+        num_cols={3},              # amount right
         avail_width=W - 2*margin,
         base_style=style,
-    )
-    if y - th < 90:
-        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
-        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    t3.drawOn(c, margin, y - th)
-    y = y - th - 30
-
-    # Material Balance Summary
-    if y < 120:
-        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
-        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, y, "Material Balance Summary")
-    y -= 12
-    mat_base_cols = [220, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(mat_base_cols))); mat_col_widths = [w * scale for w in mat_base_cols]
-    t3 = Table(rows_mat_balance, colWidths=mat_col_widths, repeatRows=0); t3.setStyle(style)
-    tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
-    
-    if y - th < 90:
-        bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
-        _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
-        c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
-    # ONLY if the negative Dana note should show
-
-    t3.drawOn(c, x_center, y - th) 
-    
-# --- If a negative Dana note should appear ---
-    if neg_dana_note:
-
-        # Define the paragraph style
-        note_style = ParagraphStyle(
-            "neg_note",
-            fontName="Helvetica-Oblique",
-            fontSize=8.5,
-            leading=12,
-            textColor=colors.black,
-            alignment=0,  # left-align text within cell
         )
-
-        # Create a 2-column table (left blank, right text)
-        note_tbl = Table(
-            [[ "", Paragraph(neg_dana_note, note_style) ]],
-            colWidths=mat_col_widths,  # same as the Material Balance table
-        )
-
-        note_tbl.setStyle(TableStyle([
-            ("ALIGN", (0, 0), (1, 0), "LEFT"),
-            ("VALIGN", (0, 0), (-1, 0), "TOP"),
-            ("LEFTPADDING",  (0, 0), (-1, -1), 0),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-            ("TOPPADDING",   (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
-            ("BORDER", (0, 0), (-1, -1), 0, colors.white),
-        ]))
-
-        # Wrap and draw directly beneath the material balance summary table
-        tw_note, th_note = note_tbl.wrapOn(c, sum(mat_col_widths), H)
-        note_tbl.drawOn(c, x_center, y - th - th_note)
-        y = y - th - th_note - 12  # move cursor below note
-
-    else:
-        # Normal spacing if no note
+        if y - th < 90:
+            bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+            _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+            c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+        t2.drawOn(c, margin, y - th)
         y = y - th - 30
+    if getattr(customer, "show_material_on_statement", True):
+        # Table 3: Material detail (Period)
+        if y < 120:
+            bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+            _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+            c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margin, y, "Material Movements (Period)")
+        y -= 12
+        receipts_table = [["Date", "Notes / Reference", "Type", "Qty (kg)"]] + rows_receipts
+
+        t3, tw, th = _build_auto_table(
+            receipts_table,
+            text_cols={1},   # Notes / Reference column wraps
+            num_cols={3},    # Qty (kg) right-aligned
+            avail_width=W - 2*margin,
+            base_style=style,
+        )
+        if y - th < 90:
+            bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+            _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+            c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+        t3.drawOn(c, margin, y - th)
+        y = y - th - 30
+
+        # Material Balance Summary
+        if y < 120:
+            bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+            _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+            c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margin, y, "Material Balance Summary")
+        y -= 12
+        mat_base_cols = [220, 100]; scale = min(1.0, (W - 2 * margin) / float(sum(mat_base_cols))); mat_col_widths = [w * scale for w in mat_base_cols]
+        t3 = Table(rows_mat_balance, colWidths=mat_col_widths, repeatRows=0); t3.setStyle(style)
+        tw, th = t3.wrapOn(c, W, H); x_center = (W - tw) / 2.0
+        
+        if y - th < 90:
+            bank_lines = (ss.bank_details_list if (ss and hasattr(ss, "bank_details_list")) else getattr(settings, "BANK_DETAILS_LINES", []))
+            _draw_footer(c, W, H, ss, bank_lines=bank_lines, ref=title, user=user)
+            c.showPage(); _draw_page_header(c, W, H, ss); y = H - margin
+        # ONLY if the negative Dana note should show
+
+        t3.drawOn(c, x_center, y - th) 
+        
+    # --- If a negative Dana note should appear ---
+        if neg_dana_note:
+
+            # Define the paragraph style
+            note_style = ParagraphStyle(
+                "neg_note",
+                fontName="Helvetica-Oblique",
+                fontSize=8.5,
+                leading=12,
+                textColor=colors.black,
+                alignment=0,  # left-align text within cell
+            )
+
+            # Create a 2-column table (left blank, right text)
+            note_tbl = Table(
+                [[ "", Paragraph(neg_dana_note, note_style) ]],
+                colWidths=mat_col_widths,  # same as the Material Balance table
+            )
+
+            note_tbl.setStyle(TableStyle([
+                ("ALIGN", (0, 0), (1, 0), "LEFT"),
+                ("VALIGN", (0, 0), (-1, 0), "TOP"),
+                ("LEFTPADDING",  (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING",   (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING",(0, 0), (-1, -1), 0),
+                ("BORDER", (0, 0), (-1, -1), 0, colors.white),
+            ]))
+
+            # Wrap and draw directly beneath the material balance summary table
+            tw_note, th_note = note_tbl.wrapOn(c, sum(mat_col_widths), H)
+            note_tbl.drawOn(c, x_center, y - th - th_note)
+            y = y - th - th_note - 12  # move cursor below note
+
+        else:
+            # Normal spacing if no note
+            y = y - th - 30
 
 
     # Bill Summary (range)
@@ -1169,12 +1175,12 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
       • Table 2: Payments received during the month (date, method, notes/ref, amount).
       • Table 3: Material balance summary (Opening, IN, OUT, Closing).
     """
-
-    theme = _get_billing_theme(ss, default="default")
+    ss = get_site_settings()
+    theme = _get_billing_theme(ss, customer=customer ,default="default")
 
     # --- Setup & Period ---
     customer = Customer.objects.get(id=customer_id)
-    ss = get_site_settings()
+    
     first, last, period_start, period_end = _period_bounds(year, month)
      # --- Opening (before this month): carry + final invoices ≤ last_month_day − payments ≤ last_month_day ---
     day_before = first - timedelta(days=1)
@@ -1346,7 +1352,7 @@ def generate_customer_monthly_statement(customer_id: int, year: int, month: int,
     + int(neg_dana_charge_pkr)   # ✅ include the Dana Minus charge
     - int(payments_period_pkr)
 )
-
+    
     # Build Dana Summary table from ledger rows we actually show
     dana_table_rows = [["Date", "Description", "KG"]]
     real_rows = 0
@@ -2150,7 +2156,7 @@ def generate_customer_ledger_pdf(customer_id, start_date, end_date, user=None) -
     CustomerMaterialLedger.objects
     .filter(customer=customer, date__range=(start_date, end_date))
     .select_related("order", "receipt")
-    .order_by("order__delivery_challan", "date", "id")
+    .order_by("date" ,"order__delivery_challan", "id")
 )
 
     # --- Build rows ---
