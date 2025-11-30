@@ -38,6 +38,38 @@ class Customer(models.Model):
         max_digits=10, decimal_places=2, null=True, blank=True,
         help_text="Override rate (PKR/kg). Leave blank to use Site Settings."
     )
+
+    # Per-customer settings for PDF Preview
+
+    is_cash_customer = models.BooleanField(
+        default=False,
+        help_text="Tick if this is a cash-only customer (no running credit balance).",
+    )
+
+    STATEMENT_THEME_CHOICES = [
+        ("", "Use global default"),
+        ("default", "Standard (multi-section)"),
+        ("compact_one_page", "Compact one-page"),
+        # add more if you ever create them
+    ]
+
+    statement_theme = models.CharField(
+        max_length=32,
+        choices=STATEMENT_THEME_CHOICES,
+        blank=True,
+        default="",
+        help_text="Override PDF layout for this customer only.",
+    )
+
+    show_payments_on_statement = models.BooleanField(
+        default=True,
+        help_text="If unticked, hide the Payments section for this customer.",
+    )
+
+    show_material_on_statement = models.BooleanField(
+        default=True,
+        help_text="If unticked, hide Material Movements / Balance for this customer.",
+    )
     @property
     def carry_remaining_pkr(self) -> int:
         """
